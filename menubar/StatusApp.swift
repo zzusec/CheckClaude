@@ -93,7 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 矢量图标(SF Symbol) + 状态色 + 出口时区城市名，确保在菜单栏可见
         let gfwtz = s["gfwtz"] ?? ""
-        let city = gfwtz.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") } ?? ""
+        // 只有合法 IANA 时区(含 /)才取城市名；"?"/空 时留空，避免红叉旁出现问号
+        let city = gfwtz.contains("/")
+            ? (gfwtz.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") } ?? "")
+            : ""
         if let btn = item.button {
             // 三路一致=绿勾✓ 不一致=红叉✗ 无数据=灰问号 (仅图标一个勾/叉，文字只放城市名)
             let symName: String
