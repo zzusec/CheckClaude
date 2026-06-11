@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hx10.auto-timezone</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/hx10/auto-timezone/auto-timezone.sh</string>
+        <string>--once</string>
+    </array>
+
+    <!-- 作为 root 守护进程运行，systemsetup 改时区无需密码 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/hx10</string>
+    </dict>
+
+    <!-- 网络变化时触发(切换 VPN/WiFi 会改写这些文件) -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/etc/resolv.conf</string>
+        <string>/Library/Preferences/SystemConfiguration</string>
+    </array>
+
+    <!-- 兜底: 每 5 分钟检查一次 -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- 开机/加载时先跑一次 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hx10/auto-timezone/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/hx10/auto-timezone/launchd.err.log</string>
+</dict>
+</plist>
