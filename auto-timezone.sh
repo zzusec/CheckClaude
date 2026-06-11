@@ -158,20 +158,19 @@ apply_timezone() {
   if set_timezone "$target"; then
     log "已切换系统时区: $current -> $target"
   else
-    log "切换失败: $current -> $target"; return 1
+    log "需改时区 $current -> $target，但未配置免密。请运行一次: sudo bash enable-auto-timezone.sh"; return 1
   fi
 }
 
-# 改时区(需管理员)。依次尝试: root 直接 / 免密 sudo / 弹系统授权框。
-# 授权框仅在"时区确实需要变更"时出现，属低频，体验可接受。
+# 改时区(需管理员)。root 直接 / 免密 sudo(需先运行 enable-auto-timezone.sh)。
+# 不再自动弹 osascript 授权框，避免每分钟反复打扰;没配免密就跳过并在日志提示。
 set_timezone() {
   local tz="$1"
   if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
     /usr/sbin/systemsetup -settimezone "$tz" >/dev/null 2>&1 && return 0
   fi
   sudo -n /usr/sbin/systemsetup -settimezone "$tz" >/dev/null 2>&1 && return 0
-  # 弹原生管理员授权框(输入密码 / Touch ID)
-  osascript -e "do shell script \"/usr/sbin/systemsetup -settimezone $tz\" with administrator privileges" >/dev/null 2>&1
+  return 1
 }
 
 main() {
