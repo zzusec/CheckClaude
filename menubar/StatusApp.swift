@@ -142,6 +142,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(intervalItem)
         menu.addItem(action("打开日志", #selector(openLog)))
         menu.addItem(.separator())
+        let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        menu.addItem(disabled("版本 v\(ver)"))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
     }
