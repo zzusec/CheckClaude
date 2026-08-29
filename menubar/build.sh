@@ -32,8 +32,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>AutoTimezone</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>1.2</string>
-    <key>CFBundleVersion</key>          <string>1.2</string>
+    <key>CFBundleShortVersionString</key> <string>1.3</string>
+    <key>CFBundleVersion</key>          <string>1.3</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>
