@@ -191,11 +191,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(disabled("尚未体检"))
         } else {
             sub.addItem(disabled(c["verdict"] ?? ""))
+            // 14 项信号，按 出口/质量/画像/DNS 分组展示: 分组~标签~权重~得分~值
+            var group = ""
+            for row in (c["signals"] ?? "").split(separator: ";") {
+                let f = row.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+                guard f.count >= 5 else { continue }
+                if f[0] != group {
+                    group = f[0]
+                    sub.addItem(.separator())
+                    sub.addItem(disabled("── \(group) ──"))
+                }
+                let ok = f[2] == f[3]
+                sub.addItem(disabled("\(ok ? "✓" : "⚠")  \(f[1])：\(f[4])   \(f[3])/\(f[2])"))
+            }
             sub.addItem(.separator())
-            sub.addItem(disabled("出口: \(c["ip"] ?? "?") · \(c["country"] ?? "?") · \(c["iptype"] ?? "?")"))
-            sub.addItem(disabled("归属: \(c["isp"] ?? "?")"))
-            sub.addItem(disabled("API 直连: HTTP \(c["api"] ?? "?")   接口: \(c["base"] ?? "?")"))
-            sub.addItem(disabled("CLI: \(c["claudever"] ?? "?")"))
+            sub.addItem(disabled("出口: \(c["ip"] ?? "?") · \(c["city"] ?? "") · \(c["asn"] ?? "?")"))
+            sub.addItem(disabled("系统: \(c["os"] ?? "?") · \(c["locale"] ?? "?") · \(c["proxymode"] ?? "?")"))
+            sub.addItem(disabled("DNS: \(c["dns"] ?? "?") · claude.ai → \(c["dnsresult"] ?? "?")"))
+            sub.addItem(disabled("CLI: \(c["claudever"] ?? "?") · 接口 \(c["base"] ?? "?")"))
             let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
             let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
             if !issues.isEmpty {
