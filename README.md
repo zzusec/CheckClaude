@@ -20,6 +20,8 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 | 文件 | 作用 |
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
+| `claude-check.sh` | Claude 运行环境体检：打分 + 问题清单 + 修复建议 + 自动修复 |
+| `test-claude-check.sh` | 体检评分逻辑自测（不联网） |
 | `com.hx10.auto-timezone.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
 | `menubar/AutoTimezone.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
 | `menubar/*.plist` | 菜单栏 App 的开机自启 LaunchAgent |
@@ -39,6 +41,38 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 - 三者一致 → 干净的真实出口（🟢）。
 - 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
+
+## Claude 运行环境体检（v1.2 新增）
+
+判断当前环境是否适合运行 Claude / Claude Code：打分 + 问题清单 + 修复建议 + 自动修复。
+评分模型参考 [check-cc](https://github.com/yacuo/check-cc) 的多信号加权思路，改为 macOS 本地实现，
+复用上面已经拿到的三路出口数据，不额外依赖 Node。
+
+```bash
+~/auto-timezone/claude-check.sh              # 体检并打印报告
+~/auto-timezone/claude-check.sh --fix        # 顺带自动修可安全修复项（时区）
+~/auto-timezone/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
+```
+
+| 信号 | 权重 | 说明 |
+|---|---|---|
+| 出口国家 | 30 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
+| API 可达性 | 25 | `api.anthropic.com` 返回 401 为正常；403 = 出口被地区拦截 |
+| 三路一致性 | 15 | 分流 / PAC 会让账号画像在多地区间跳变 |
+| 时区一致 | 10 | 系统时区 vs 出口 IP 时区，典型矛盾信号，**可一键修复** |
+| 语言区域 | 10 | 系统区域与出口地区是否矛盾（网页端登录时暴露） |
+| IP 质量 | 10 | 住宅 / 机房 IDC / 公开代理，风控强度不同 |
+
+得分 ≥85 优秀 🟢，70–84 良好 🟡，50–69 风险 🟠，<50 高风险 🔴。
+Claude CLI 版本与接口地址（官方 / 中转）作为信息项展示，不计分；已配中转时，
+API 直连不通不会按满额扣分。
+
+菜单栏「Claude 环境 🟢 92 分」子菜单里可查看全部明细、问题与建议，并直接点「一键修复」。
+体检**只在出口 IP 变化或手动点击时触发**，不会每分钟去敲 Anthropic 接口。
+
+> 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
+
+评分逻辑自测（不联网）：`bash test-claude-check.sh`
 
 ## 告警
 

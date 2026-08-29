@@ -17,6 +17,8 @@ mv "$BIN" "$APP/Contents/MacOS/$BIN"
 # 把检测脚本打包进 App，实现自包含可分发
 cp ../auto-timezone.sh "$APP/Contents/Resources/auto-timezone.sh"
 chmod +x "$APP/Contents/Resources/auto-timezone.sh"
+cp ../claude-check.sh "$APP/Contents/Resources/claude-check.sh"
+chmod +x "$APP/Contents/Resources/claude-check.sh"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat >"$APP/Contents/Info.plist" <<'PLIST'
@@ -30,8 +32,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>AutoTimezone</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>1.1</string>
-    <key>CFBundleVersion</key>          <string>1.1</string>
+    <key>CFBundleShortVersionString</key> <string>1.2</string>
+    <key>CFBundleVersion</key>          <string>1.2</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

@@ -11,15 +11,21 @@ let baseDir: String = {
     return dir.path
 }()
 let statusPath = (baseDir as NSString).appendingPathComponent("status")
+let claudeStatusPath = (baseDir as NSString).appendingPathComponent("claude_status")
 let logPath = (baseDir as NSString).appendingPathComponent("auto-timezone.log")
 // 检测脚本: 优先用 App 包内 Resources 里的，开发时回退到源码目录
-let scriptPath: String = Bundle.main.path(forResource: "auto-timezone", ofType: "sh")
-    ?? (NSHomeDirectory() as NSString).appendingPathComponent("auto-timezone/auto-timezone.sh")
+func script(_ name: String) -> String {
+    Bundle.main.path(forResource: name, ofType: "sh")
+        ?? (NSHomeDirectory() as NSString).appendingPathComponent("auto-timezone/\(name).sh")
+}
+let scriptPath = script("auto-timezone")
+let claudeScriptPath = script("claude-check")
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var uiTimer: Timer?
     var scanTimer: Timer?
+    var lastExitIP = ""      // 出口 IP 变化时才重跑 Claude 环境体检
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.menu = NSMenu()
@@ -55,10 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    func runScript(_ args: [String]) {
+    func runScript(_ args: [String], _ path: String = scriptPath) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
-        p.arguments = [scriptPath] + args
+        p.arguments = [path] + args
         var env = ProcessInfo.processInfo.environment
         env["AUTO_TZ_DIR"] = baseDir   // 与脚本共用同一数据目录
         p.environment = env
@@ -75,8 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? p.run()
     }
 
-    func readStatus() -> [String: String] {
-        guard let txt = try? String(contentsOfFile: statusPath, encoding: .utf8) else { return [:] }
+    func readStatus(_ path: String = statusPath) -> [String: String] {
+        guard let txt = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
         var d: [String: String] = [:]
         for line in txt.split(separator: "\n") {
             if let eq = line.firstIndex(of: "=") {
@@ -127,6 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("系统时区: \(tz)"))
         menu.addItem(disabled("更新时间: \(s["time"] ?? "—")"))
         menu.addItem(.separator())
+        menu.addItem(claudeMenuItem())
+        menu.addItem(.separator())
         menu.addItem(action("立即检测", #selector(runCheck)))
         // 检测间隔子菜单
         let intervalMenu = NSMenu()
@@ -146,6 +154,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("版本 v\(ver)"))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
+
+        autoCheckIfExitChanged(s)
     }
 
     func disabled(_ t: String) -> NSMenuItem {
@@ -158,6 +168,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         i.target = self
         return i
     }
+
+    // ── Claude 环境体检 ──────────────────────────────────────────
+    // 出口 IP 变了才自动重测(环境画像只跟着出口走)，避免每分钟去敲 anthropic API
+    func autoCheckIfExitChanged(_ s: [String: String]) {
+        let ip = s["gfw"] ?? ""
+        guard !ip.isEmpty, ip != "?" else { return }
+        if ip != lastExitIP {
+            lastExitIP = ip
+            runScript(["--quiet"], claudeScriptPath)
+        }
+    }
+
+    func claudeMenuItem() -> NSMenuItem {
+        let c = readStatus(claudeStatusPath)
+        let score = Int(c["score"] ?? "") ?? -1
+        let dot = score < 0 ? "⚪️" : (score >= 85 ? "🟢" : score >= 70 ? "🟡" : score >= 50 ? "🟠" : "🔴")
+        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
+
+        let sub = NSMenu()
+        if score < 0 {
+            sub.addItem(disabled("尚未体检"))
+        } else {
+            sub.addItem(disabled(c["verdict"] ?? ""))
+            sub.addItem(.separator())
+            sub.addItem(disabled("出口: \(c["ip"] ?? "?") · \(c["country"] ?? "?") · \(c["iptype"] ?? "?")"))
+            sub.addItem(disabled("归属: \(c["isp"] ?? "?")"))
+            sub.addItem(disabled("API 直连: HTTP \(c["api"] ?? "?")   接口: \(c["base"] ?? "?")"))
+            sub.addItem(disabled("CLI: \(c["claudever"] ?? "?")"))
+            let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
+            let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
+            if !issues.isEmpty {
+                sub.addItem(.separator())
+                issues.forEach { sub.addItem(disabled("⚠️  \($0)")) }
+            }
+            if !fixes.isEmpty {
+                sub.addItem(.separator())
+                fixes.forEach { sub.addItem(disabled("→  \($0)")) }
+            }
+            sub.addItem(.separator())
+            sub.addItem(disabled("体检时间: \(c["time"] ?? "—")"))
+        }
+        sub.addItem(.separator())
+        sub.addItem(action("重新体检", #selector(runClaudeCheck)))
+        if c["fixable"] == "1" {
+            sub.addItem(action("一键修复(时区)", #selector(runClaudeFix)))
+        }
+        if let cc = c["country"], cc != "?", (c["locale"] ?? "").hasSuffix("_\(cc)") == false {
+            sub.addItem(action("把系统区域改为 \(cc)", #selector(runClaudeFixLocale)))
+        }
+
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    @objc func runClaudeCheck() { runScript(["--quiet"], claudeScriptPath) }
+    @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
+    @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
     @objc func runCheck() { runScript(["--once"]) }
 
