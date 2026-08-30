@@ -14,7 +14,7 @@ base_signals() {
   COUNTRY=US; COUNTRY2=US; COUNTRY_NAME=美国; CITY=LA; ISP=Comcast; ASN=AS7922
   HOSTING=0; PROXY=0
   API_CODE=401; WEB_CODE=200; API_REGION_BLOCK=0
-  CF_COLO=LAX; CF_LOC=US; CF_IP=1.2.3.4; PROBE_IP=1.2.3.4
+  CF_COLO=LAX; CF_LOC=US; CF_IP=1.2.3.4; PROBE_IP=1.2.3.4; CN_IP=1.2.3.4; INTL_IP=1.2.3.4
   CONSISTENT=1; SYS_TZ=America/Los_Angeles; GFW_TZ=America/Los_Angeles
   TZ_SELF_CONSISTENT=1; TZ_OFFSET=-0700; TZ_ABBR=PDT
   SYS_LOCALE=en_US; SYS_LANG=en; LOCALE_CC=US
@@ -113,6 +113,12 @@ check "扣 3 分" "$SCORE" "$((f6 - 3))"
 check "点名 IPv6 暴露" "$(echo "$ISSUES" | grep -c '代理没接管 IPv6')" 1
 base_signals; IPV6="2606:4700::1"; IPV6_CC=US; compute_score
 check "同地区不扣分" "$SCORE" "$f6"
+
+echo "⑭ 三路不一致要硬降级，不能因为分数高就叫「良好」"
+base_signals; CONSISTENT=0; compute_score
+check "评级为风险" "$GRADE" 风险
+check "点名分流" "$(echo "$VERDICT" | grep -c "出口 IP 分流")" 1
+check "三路不一致硬降级不受分数影响" "$([[ $SCORE -ge 70 ]] && echo yes)" yes
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }
