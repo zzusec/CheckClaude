@@ -15,7 +15,11 @@
 
 set -uo pipefail
 
-DATA_DIR="${AUTO_TZ_DIR:-$HOME/Library/Application Support/AutoTimezone}"
+DATA_DIR="${AUTO_TZ_DIR:-$HOME/Library/Application Support/CheckClaude}"
+# v2.0 从 AutoTimezone 改名 CheckClaude，把旧数据目录搬过来 ——
+# 出口稳定性要读 24h 内的历史日志，不搬会丢。
+OLD_DIR="$HOME/Library/Application Support/AutoTimezone"
+[[ ! -d "$DATA_DIR" && -d "$OLD_DIR" ]] && mv "$OLD_DIR" "$DATA_DIR" 2>/dev/null
 mkdir -p "$DATA_DIR" 2>/dev/null || true
 STATUS="$DATA_DIR/status"                # auto-timezone.sh 写的三路出口快照
 CSTATUS="$DATA_DIR/claude_status"        # 本脚本写的体检快照(菜单栏 App 读)
@@ -595,7 +599,7 @@ fix_dns_doh() {
 <plist version="1.0"><dict>
   <key>PayloadContent</key><array><dict>
     <key>PayloadType</key><string>com.apple.dnsSettings.managed</string>
-    <key>PayloadIdentifier</key><string>com.example.auto-timezone.doh</string>
+    <key>PayloadIdentifier</key><string>com.example.checkclaude-daemon.doh</string>
     <key>PayloadUUID</key><string>$u1</string>
     <key>PayloadVersion</key><integer>1</integer>
     <key>PayloadDisplayName</key><string>加密 DNS (Cloudflare DoH)</string>
@@ -604,8 +608,8 @@ fix_dns_doh() {
       <key>ServerURL</key><string>https://cloudflare-dns.com/dns-query</string>
     </dict>
   </dict></array>
-  <key>PayloadDisplayName</key><string>AutoTimezone 加密 DNS</string>
-  <key>PayloadIdentifier</key><string>com.example.auto-timezone.doh.profile</string>
+  <key>PayloadDisplayName</key><string>CheckClaude 加密 DNS</string>
+  <key>PayloadIdentifier</key><string>com.example.checkclaude-daemon.doh.profile</string>
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>$u2</string>
   <key>PayloadVersion</key><integer>1</integer>

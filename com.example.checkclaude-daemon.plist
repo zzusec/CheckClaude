@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.example.auto-timezone</string>
+    <string>com.example.checkclaude-daemon</string>
 
     <key>ProgramArguments</key>
     <array>
