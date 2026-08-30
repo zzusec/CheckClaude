@@ -173,7 +173,10 @@ parse_system() {
   # 代理形态: TUN 接管(默认路由走 utun) / 系统 HTTP 代理 / PAC 自动配置
   PROXY_MODE="直连"
   local dev pac http_p
-  dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  # TUN 类代理(FlClash/Clash/Surge)靠 0.0.0.0/1 + 128.0.0.0/1 抢公网流量，**不动 default 路由**，
+  # 所以查 default 只会看到物理网卡，误判成"直连"。要看去公网的地址实际走哪个接口。
+  dev=$(route -n get 93.184.216.34 2>/dev/null | awk '/interface:/{print $2}')
+  [[ -z "$dev" ]] && dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
   [[ "$dev" == utun* ]] && PROXY_MODE="TUN 全局"
   http_p=$(scutil --proxy 2>/dev/null | awk '/HTTPEnable/{print $3}')
   pac=$(scutil --proxy 2>/dev/null | awk '/ProxyAutoConfigEnable/{print $3}')
@@ -373,12 +376,25 @@ compute_score() {
                       "claude.ai 解析到非 Cloudflare 地址(${DNS_RESULT})，可能被劫持" "换 DoH/加密 DNS 或由代理接管 DNS" ;;
   esac
 
+  # TUN 全局下 DNS 查询本身就走隧道出去，不会泄漏到国内网络，判定要跟着代理形态走
+  local tun=0; [[ "$PROXY_MODE" == "TUN 全局"* ]] && tun=1
   case "$DNS_SCOPE" in
     本地/代理接管*) sig DNS "DNS 出口" 4 100 "$DNS_SCOPE" ;;
-    国内公共DNS*)   sig DNS "DNS 出口" 4 0 "$DNS_SCOPE" \
-                      "正在用${DNS_SCOPE}，DNS 查询泄漏到国内，与国外出口矛盾" \
-                      "改用 1.1.1.1 / 8.8.8.8 或让代理接管 DNS" ;;
-    *)              sig DNS "DNS 出口" 4 80 "$DNS_SCOPE" ;;
+    国内公共DNS*)
+      if [[ $tun -eq 1 ]]; then
+        sig DNS "DNS 出口" 4 70 "$DNS_SCOPE (走隧道)" \
+          "用的是国内公共 DNS，虽然 TUN 下查询走隧道不算泄漏，但没必要绕这一圈" "换成 1.1.1.1 / 8.8.8.8"
+      else
+        sig DNS "DNS 出口" 4 0 "$DNS_SCOPE" \
+          "正在用${DNS_SCOPE}，DNS 查询泄漏到国内，与国外出口矛盾" \
+          "改用 1.1.1.1 / 8.8.8.8 或让代理接管 DNS"
+      fi ;;
+    *)
+      if [[ $tun -eq 1 ]]; then
+        sig DNS "DNS 出口" 4 100 "$DNS_SCOPE (走隧道)"
+      else
+        sig DNS "DNS 出口" 4 80 "$DNS_SCOPE"
+      fi ;;
   esac
 
   # ── E. 环境稳定性 / 运行容器 (10) ──
