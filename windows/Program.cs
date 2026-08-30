@@ -1054,6 +1054,15 @@ namespace CheckClaude
         System.Windows.Forms.Timer scanTimer, updTimer;
         string lastExitIp = "", notifiedVersion = "";
         DateTime notifiedAt = DateTime.MinValue;
+        bool promptingUpgrade;
+
+        // MessageBox 会阻塞消息循环，不能在 BuildMenu 里同步弹
+        void BeginInvokeSoon(Action a)
+        {
+            var t = new System.Windows.Forms.Timer { Interval = 200 };
+            t.Tick += (s, e) => { t.Stop(); t.Dispose(); a(); };
+            t.Start();
+        }
         bool busy, probeBusy;
         BrowserBridge bridge;
         // 检测间隔存注册表，重启后保持
@@ -1390,12 +1399,33 @@ namespace CheckClaude
                 up.ForeColor = Color.FromArgb(0, 102, 204);
                 m.Items.Add(up);
                 // 有新版就持续提醒，但每天最多一次 —— 只弹一次的话，错过就再也不提了
-                if (notifiedVersion != Updater.Latest || (DateTime.Now - notifiedAt).TotalHours >= 24)
+                // 发现新版直接弹窗问要不要装 —— 气泡只是告知，用户还得自己去托盘找入口，太绕。
+                // 每天最多弹一次: 只弹一次会错过，每次重画菜单都弹会烦死人。
+                if (!promptingUpgrade &&
+                    (notifiedVersion != Updater.Latest || (DateTime.Now - notifiedAt).TotalHours >= 24))
                 {
                     notifiedVersion = Updater.Latest;
                     notifiedAt = DateTime.Now;
-                    icon.ShowBalloonTip(6000, "CheckClaude 有新版本 v" + Updater.Latest,
-                        "右键托盘图标 →「升级到 v" + Updater.Latest + "」一键更新", ToolTipIcon.Info);
+                    promptingUpgrade = true;
+                    var latest = Updater.Latest;
+                    BeginInvokeSoon(() =>
+                    {
+                        try
+                        {
+                            var r = MessageBox.Show(
+                                "当前 v" + Application.ProductVersion + "。\r\n\r\n" +
+                                "点「是」自动下载、安装并重启，无需其它操作。",
+                                "CheckClaude 有新版本 v" + latest,
+                                MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                            if (r == DialogResult.Yes)
+                            {
+                                icon.ShowBalloonTip(5000, "正在升级到 v" + latest,
+                                    "下载完成后会自动重启", ToolTipIcon.Info);
+                                Updater.Install();
+                            }
+                        }
+                        finally { promptingUpgrade = false; }
+                    });
                 }
             }
             else
