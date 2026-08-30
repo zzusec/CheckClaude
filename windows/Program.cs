@@ -1053,6 +1053,7 @@ namespace CheckClaude
         Report report;
         System.Windows.Forms.Timer scanTimer, updTimer;
         string lastExitIp = "", notifiedVersion = "";
+        DateTime notifiedAt = DateTime.MinValue;
         bool busy, probeBusy;
         BrowserBridge bridge;
         // 检测间隔存注册表，重启后保持
@@ -1289,7 +1290,8 @@ namespace CheckClaude
             bool consistent = report != null && report.F.Consistent;
             AlertIfUnsafe(score, consistent, report == null ? "" : report.Verdict);
             icon.Icon = MakeIcon(ScoreColor(score, consistent));
-            icon.Text = report == null ? "CheckClaude 检测中…" : ("CheckClaude " + score + " 分 · " + report.Grade);
+            icon.Text = (report == null ? "CheckClaude 检测中…" : ("CheckClaude " + score + " 分 · " + report.Grade))
+                      + (Updater.HasUpdate ? "（有新版 v" + Updater.Latest + "）" : "");
 
             if (report == null) { m.Items.Add(Item("正在检测…")); }
             else
@@ -1387,9 +1389,11 @@ namespace CheckClaude
                 var up = Item("⬆ 升级到 v" + Updater.Latest, (s, e) => Updater.Install());
                 up.ForeColor = Color.FromArgb(0, 102, 204);
                 m.Items.Add(up);
-                if (notifiedVersion != Updater.Latest)
+                // 有新版就持续提醒，但每天最多一次 —— 只弹一次的话，错过就再也不提了
+                if (notifiedVersion != Updater.Latest || (DateTime.Now - notifiedAt).TotalHours >= 24)
                 {
                     notifiedVersion = Updater.Latest;
+                    notifiedAt = DateTime.Now;
                     icon.ShowBalloonTip(6000, "CheckClaude 有新版本 v" + Updater.Latest,
                         "右键托盘图标 →「升级到 v" + Updater.Latest + "」一键更新", ToolTipIcon.Info);
                 }
