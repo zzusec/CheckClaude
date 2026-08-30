@@ -887,10 +887,11 @@ namespace CheckClaude
                 r.Verdict = "出口 IP 分流(国内 " + (f.CnIp ?? "?") + " / 国外 " + (f.IntlIp ?? "?")
                           + ")，账号画像会在多地区间跳变，不建议使用";
             }
+            // 档位措辞按二元标准: 只有绿档说"可用"，其余一律明说"不建议使用"
             else if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
-            else if (r.Score >= 70) { r.Grade = "良好"; r.Verdict = "基本可用，建议修复下列项"; }
-            else if (r.Score >= 50) { r.Grade = "风险"; r.Verdict = "存在明显矛盾信号，有封号风险"; }
-            else { r.Grade = "高风险"; r.Verdict = "不建议在当前环境登录或使用 Claude"; }
+            else if (r.Score >= 70) { r.Grade = "有风险"; r.Verdict = "存在矛盾信号，不建议使用 Claude，先按提示修复"; }
+            else if (r.Score >= 50) { r.Grade = "高风险"; r.Verdict = "多项信号冲突，不建议在当前环境登录或使用 Claude"; }
+            else { r.Grade = "危险"; r.Verdict = "环境画像严重冲突，使用 Claude 有较高封号风险"; }
             return r;
         }
     }

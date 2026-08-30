@@ -589,10 +589,12 @@ compute_score() {
   elif [[ "$CONSISTENT" != "1" ]]; then
     GRADE="风险"
     VERDICT="出口 IP 分流(国内 ${CN_IP} / 国外 ${INTL_IP})，账号画像会在多地区间跳变，不建议使用"
+  # 档位措辞按二元标准: 只有绿档说"可用"，其余一律明说"不建议使用" ——
+  # 原来 83 分显示"良好"，和橙色图标、"不建议使用"的通知自相矛盾。
   elif [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
-  elif [[ $SCORE -ge 70 ]]; then GRADE="良好"; VERDICT="基本可用，建议修复下列项"
-  elif [[ $SCORE -ge 50 ]]; then GRADE="风险"; VERDICT="存在明显矛盾信号，有封号风险"
-  else                           GRADE="高风险"; VERDICT="不建议在当前环境登录或使用 Claude"
+  elif [[ $SCORE -ge 70 ]]; then GRADE="有风险"; VERDICT="存在矛盾信号，不建议使用 Claude，先按提示修复"
+  elif [[ $SCORE -ge 50 ]]; then GRADE="高风险"; VERDICT="多项信号冲突，不建议在当前环境登录或使用 Claude"
+  else                           GRADE="危险"; VERDICT="环境画像严重冲突，使用 Claude 有较高封号风险"
   fi
 }
 
