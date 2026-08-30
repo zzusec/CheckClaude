@@ -57,7 +57,7 @@ DNS_SCOPE="国内公共DNS(223.5.5.5)"; IPV6="2408:8207::1"; IPV6_CC=CN
 compute_score
 check "标记时区可修" "$FIXABLE_TZ" America/New_York
 check "分数 70-84" "$([[ $SCORE -ge 70 && $SCORE -lt 85 ]] && echo yes)" yes
-check "评级良好" "$GRADE" 良好
+check "评级为有风险(不能叫良好)" "$GRADE" 有风险
 
 echo "⑤ 修好时区后应加满 5 分"
 before=$SCORE; SYS_TZ=America/New_York; compute_score
