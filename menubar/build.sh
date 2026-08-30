@@ -34,8 +34,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>CheckClaude</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>2.4</string>
-    <key>CFBundleVersion</key>          <string>2.4</string>
+    <key>CFBundleShortVersionString</key> <string>2.5</string>
+    <key>CFBundleVersion</key>          <string>2.5</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

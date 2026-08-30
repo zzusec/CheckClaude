@@ -1011,7 +1011,7 @@ namespace CheckClaude
                 m.Items.Add(Item("检查更新", (s, e) => Task.Run(() => { Updater.Check(); Sync(BuildMenu); })));
             }
             m.Items.Add(new ToolStripSeparator());
-            m.Items.Add(Item("官方网站：https://www.yinso.com/labs/",
+            m.Items.Add(Item("官方网站",
                 (s, e) => { try { Process.Start("https://www.yinso.com/labs/"); } catch { } }));
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(Item("退出", (s, e) => { icon.Visible = false; Application.Exit(); }));
