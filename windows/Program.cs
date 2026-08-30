@@ -879,6 +879,14 @@ namespace CheckClaude
 
             if (Collector.IsUnsupported(f.Country))
             { r.Grade = "高风险"; r.Verdict = Collector.RegionNote(f.Country); }
+            // 三路出口不一致 = 分流模式，账号画像在多地区间跳变，是风控最敏感的信号之一。
+            // 只按扣分算(才 5 分)会让 80 多分的环境显示"良好"，与红色图标自相矛盾 —— 硬降级。
+            else if (!f.Consistent)
+            {
+                r.Grade = "风险";
+                r.Verdict = "出口 IP 分流(国内 " + (f.CnIp ?? "?") + " / 国外 " + (f.IntlIp ?? "?")
+                          + ")，账号画像会在多地区间跳变，不建议使用";
+            }
             else if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
             else if (r.Score >= 70) { r.Grade = "良好"; r.Verdict = "基本可用，建议修复下列项"; }
             else if (r.Score >= 50) { r.Grade = "风险"; r.Verdict = "存在明显矛盾信号，有封号风险"; }
