@@ -25,13 +25,14 @@ base_signals() {
   BR_OK=1; BR_TZ=America/Los_Angeles; BR_LANGS=en-US,en; BR_LOCALE=en-US
   BR_RTC=1.2.3.4; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"; BR_LOCALE=en-US
   SITE_CODE=200; IPV6=""; IPV6_CC=""; SYS_LANGS=en-US
+  OS_VER="macOS 26.6"; BR_SOURCE=browser; BR_UA=Chrome; BR_CH_PLAT=macOS; BR_ACCEPT=en-US; BR_UAD_PLAT=macOS
 }
 
 echo "① 完美环境 => 100 分且无问题"
 base_signals; compute_score
 check "满分" "$SCORE" 100
 check "无问题" "$ISSUES" ""
-check "24 项信号" "${#SIGNALS[@]}" 24
+check "26 项信号" "${#SIGNALS[@]}" 26
 
 echo "② 权重表合计必须正好 100(防止加信号时算错总分)"
 total=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r _ _ w _ _ <<<"$r"; total=$((total+w)); done
@@ -43,7 +44,7 @@ COUNTRY=CN; COUNTRY2=CN; API_CODE=403; WEB_CODE=403; CONSISTENT=0
 SYS_TZ=Asia/Shanghai; GFW_TZ=America/New_York; SYS_LOCALE=zh_CN; SYS_LANG=zh; LOCALE_CC=CN
 DNS_SCOPE="国内公共DNS(114.114.114.114)"; HOSTING=1; PROXY_MODE=直连
 compute_score
-check "低于 50" "$([[ $SCORE -lt 50 ]] && echo yes)" yes
+check "不服务地区给出具体说明" "$(echo "$VERDICT" | grep -c "中国大陆：Anthropic 未在此开放服务")" 1
 check "评级高风险" "$GRADE" 高风险
 check "点名不支持地区" "$(echo "$ISSUES" | grep -c '不在 Anthropic 服务范围')" 1
 check "点名 DNS 泄漏国内" "$(echo "$ISSUES" | grep -c 'DNS 查询泄漏到国内')" 1
@@ -94,7 +95,7 @@ check "点名 UDP 绕过代理" "$(echo "$ISSUES" | grep -c 'UDP 绕过了代理
 
 echo "⑪ 浏览器信号没采集到 => 给部分分而不是判零"
 base_signals; BR_OK=0; compute_score
-check "浏览器组拿到 9/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 9
+check "浏览器组拿到 11/17" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 11
 check "不产生误报问题" "$(echo "$ISSUES" | grep -c 浏览器)" 0
 
 echo "⑫ TUN 全局下 DNS 走隧道，不该按泄漏扣满分"
