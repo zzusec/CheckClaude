@@ -184,8 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(action("检查更新", #selector(checkUpdate)))
         }
         menu.addItem(.separator())
-        menu.addItem(disabled("本公司其他产品"))
-        menu.addItem(action("叮叮提醒 — 重要的事，我来帮你记着", #selector(openYinso)))
+        menu.addItem(action("官方网站：https://www.yinso.com/labs/", #selector(openYinso)))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
 
@@ -342,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func doUpgrade() { runScript(["--install"], upgradeScriptPath) }
 
     @objc func openYinso() {
-        NSWorkspace.shared.open(URL(string: "https://www.yinso.com")!)
+        NSWorkspace.shared.open(URL(string: "https://www.yinso.com/labs/")!)
     }
 
     @objc func openLog() {
