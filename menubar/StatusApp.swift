@@ -1,5 +1,6 @@
 import Cocoa
 import WebKit
+import Network
 
 // auto-timezone 菜单栏监控 App (LSUIElement)
 // 自包含: 检测脚本打包在 App 内，数据写入用户的 Application Support 目录。
@@ -37,6 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var scanTimer: Timer?
     var lastExitIP = ""      // 出口 IP 变化时才重跑 Claude 环境体检
     var probe: BrowserProbe?
+    var bridge: BrowserBridge?
+    var phase: String?          // 非 nil = 正在检测(内部分两步，不暴露给用户)
     var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -78,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    func runScript(_ args: [String], _ path: String = scriptPath) {
+    func runScript(_ args: [String], _ path: String = scriptPath, then: (() -> Void)? = nil) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [path] + args
@@ -86,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         env["AUTO_TZ_DIR"] = baseDir   // 与脚本共用同一数据目录
         p.environment = env
         p.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async { self?.refresh() }
+            DispatchQueue.main.async { self?.refresh(); then?() }
         }
         try? p.run()
     }
@@ -153,7 +156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(claudeMenuItem())
         // 体检和修复都放主菜单一级，不藏进子菜单(子菜单只放明细)
         let c = readStatus(claudeStatusPath)
-        menu.addItem(action("重新体检", #selector(runClaudeCheck)))
+        if phase != nil {
+            menu.addItem(disabled("正在检测…"))
+        } else {
+            menu.addItem(action("重新体检", #selector(runClaudeCheck)))
+        }
         if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
             menu.addItem(action("⚡ 一键修复：\(list)", #selector(runClaudeFix)))
         }
@@ -226,15 +233,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // 先用 WebView 采集浏览器信号，再跑体检脚本(脚本要读采集结果)
+    // 体检分两步: ① 系统检测(本地信号，1~2 秒出结果) ② 浏览器指纹采集(后台开标签，采完自动关)
+    // 第二步失败或用户关掉时，回退到内置 WKWebView 采集，保证浏览器组始终有数据。
     func fullCheck(_ args: [String] = ["--quiet"]) {
-        guard probe == nil else { return }          // 采集中就别叠加
+        guard phase == nil else { return }           // 正在检测就别叠加
+        phase = "1/2 系统检测"
+        refresh()
+        runScript(args, claudeScriptPath) { [weak self] in
+            guard let self else { return }
+            guard self.browserProbeEnabled else { self.phase = nil; self.refresh(); return }
+            self.phase = "2/2 浏览器指纹"
+            self.refresh()
+            self.bridge = BrowserBridge(outPath: browserPath) { [weak self] ok in
+                guard let self else { return }
+                self.bridge = nil
+                if ok {
+                    // 拿到真实浏览器指纹，重跑一次评分把这组信号合进去
+                    self.runScript(["--quiet"], claudeScriptPath) { self.phase = nil; self.refresh() }
+                } else {
+                    self.fallbackWebView()
+                }
+            }
+            self.bridge?.start()
+        }
+    }
+
+    // 真实浏览器没回传时的兜底: 用内置 WKWebView 采一份(拿不到 Client Hints，但总比没有强)
+    func fallbackWebView() {
+        guard probe == nil else { phase = nil; refresh(); return }
         probe = BrowserProbe(outPath: browserPath) { [weak self] in
             guard let self else { return }
             self.probe = nil
-            self.runScript(args, claudeScriptPath)
+            self.runScript(["--quiet"], claudeScriptPath) { self.phase = nil; self.refresh() }
         }
         probe?.run()
+    }
+
+    // 隐藏开关，正常用户不需要知道体检内部分两步。真要关:
+    //   defaults write com.hx10.checkclaude browserProbe -bool false
+    var browserProbeEnabled: Bool {
+        UserDefaults.standard.object(forKey: "browserProbe") as? Bool ?? true
     }
 
     func claudeMenuItem() -> NSMenuItem {
@@ -323,6 +361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func runClaudeCheck() { fullCheck() }
+
+    @objc func toggleBrowserProbe() {
+        UserDefaults.standard.set(!browserProbeEnabled, forKey: "browserProbe")
+        refresh()
+    }
     // 修复不依赖浏览器信号，直接跑脚本，别让用户干等 WebView 采集
     @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
     @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
@@ -510,6 +553,235 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
     </script></body>
     """
 }
+
+
+// 真实浏览器指纹采集: 起一个只听 127.0.0.1 的极简 HTTP server，用 open 唤起用户的默认浏览器
+// 来访问它。WKWebView 是 Safari 引擎，拿不到 Client Hints / Sec-Fetch，也不是用户真正登录
+// claude.ai 时用的那个浏览器；走这条路采到的才是 Anthropic 网页端实际看到的指纹。
+//
+// 安全: 只绑 127.0.0.1、随机端口、URL 带一次性 token、拿到结果或 90 秒超时立即关闭监听。
+final class BrowserBridge {
+    private var listener: NWListener?
+    private var timeout: Timer?
+    private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
+    private let outPath: String
+    private let done: (Bool) -> Void
+    private var finished = false
+
+    init(outPath: String, done: @escaping (Bool) -> Void) { self.outPath = outPath; self.done = done }
+
+    func start() {
+        do {
+            let l = try NWListener(using: .tcp, on: .any)
+            l.newConnectionHandler = { [weak self] c in self?.handle(c) }
+            l.stateUpdateHandler = { [weak self] st in
+                guard case .ready = st, let self, let port = self.listener?.port else { return }
+                let url = "http://127.0.0.1:\(port.rawValue)/c?t=\(self.token)"
+                // activates=false: 浏览器在后台开标签页，不抢焦点、不打断当前工作。
+                // 采集完页面会自己 window.close()，用户基本无感。
+                let cfg = NSWorkspace.OpenConfiguration()
+                cfg.activates = false
+                cfg.addsToRecentItems = false
+                NSWorkspace.shared.open(URL(string: url)!, configuration: cfg, completionHandler: nil)
+            }
+            listener = l
+            l.start(queue: .main)
+            timeout = Timer.scheduledTimer(withTimeInterval: 90, repeats: false) { [weak self] _ in self?.finish(false) }
+        } catch { done(false) }
+    }
+
+    private func handle(_ c: NWConnection) {
+        c.start(queue: .main)
+        c.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, _, _ in
+            guard let self, let data, let req = String(data: data, encoding: .utf8) else { c.cancel(); return }
+            let head = req.components(separatedBy: "\r\n\r\n").first ?? req
+            let lines = head.components(separatedBy: "\r\n")
+            let start = lines.first ?? ""
+            guard start.contains(self.token) else { self.respond(c, 403, "text/plain", "forbidden"); return }
+
+            if start.hasPrefix("POST") {
+                let body = req.components(separatedBy: "\r\n\r\n").dropFirst().joined(separator: "\r\n\r\n")
+                self.save(headers: lines, body: body)
+                self.respond(c, 200, "text/plain", "ok")
+                self.finish(true)
+            } else {
+                self.respond(c, 200, "text/html; charset=utf-8", Self.page(token: String(self.token)))
+            }
+        }
+    }
+
+    private func respond(_ c: NWConnection, _ code: Int, _ type: String, _ body: String) {
+        let b = Array(body.utf8)
+        let resp = "HTTP/1.1 \(code) OK\r\nContent-Type: \(type)\r\nContent-Length: \(b.count)\r\nConnection: close\r\n\r\n"
+        c.send(content: Data(resp.utf8) + Data(b), completion: .contentProcessed { _ in c.cancel() })
+    }
+
+    // 服务端能看到的请求头正是浏览器指纹的一部分，JS 拿不到自己发出去的这些头
+    private func save(headers: [String], body: String) {
+        var out: [String: String] = ["source": "browser"]
+        let want = ["user-agent": "ua", "accept-language": "accept_lang",
+                    "sec-ch-ua": "ch_ua", "sec-ch-ua-platform": "ch_platform",
+                    "sec-ch-ua-mobile": "ch_mobile", "sec-fetch-site": "sf_site",
+                    "sec-fetch-mode": "sf_mode", "sec-fetch-dest": "sf_dest"]
+        for h in headers.dropFirst() {
+            guard let i = h.firstIndex(of: ":") else { continue }
+            let k = h[..<i].lowercased(), v = h[h.index(after: i)...].trimmingCharacters(in: .whitespaces)
+            if let key = want[String(k)] { out[key] = v.replacingOccurrences(of: "\"", with: "") }
+        }
+        for kv in body.components(separatedBy: "\n") {
+            guard let i = kv.firstIndex(of: "=") else { continue }
+            out[String(kv[..<i])] = String(kv[kv.index(after: i)...])
+        }
+        var txt = "time=\(Int(Date().timeIntervalSince1970))\n"
+        for (k, v) in out.sorted(by: { $0.key < $1.key }) {
+            txt += "\(k)=\(v.replacingOccurrences(of: "\n", with: " "))\n"
+        }
+        try? txt.write(toFile: outPath, atomically: true, encoding: .utf8)
+    }
+
+    private func finish(_ ok: Bool) {
+        guard !finished else { return }
+        finished = true
+        timeout?.invalidate(); listener?.cancel(); listener = nil
+        done(ok)
+    }
+
+    static func page(token: String) -> String {
+        return """
+        <!doctype html><meta charset="utf-8"><title>CheckClaude 浏览器指纹检测</title>
+        <style>body{font:15px/1.8 -apple-system,system-ui,sans-serif;max-width:32rem;margin:16vh auto;padding:0 1.5rem;color:#1a1a2e}
+        h1{font-size:1.3rem;margin:0 0 .6rem}p{color:#5c5c70;margin:.4rem 0}
+        .ok{color:#2f855a;font-weight:500}.err{color:#c53030}
+        table{border-collapse:collapse;width:100%;margin:1rem 0 1.4rem;font-size:.92rem}
+        th{text-align:left;font-weight:400;color:#8a8a9a;padding:.45rem .9rem .45rem 0;white-space:nowrap;vertical-align:top;width:7.5rem}
+        td{padding:.45rem 0;color:#1a1a2e;word-break:break-all}
+        tr+tr th,tr+tr td{border-top:1px solid #ececf3}
+        .mute{font-size:.86rem;color:#8a8a9a}
+        #keep{font:inherit;font-size:.86rem;margin-left:.5rem;padding:.2rem .7rem;cursor:pointer;
+              border:1px solid #ddd8ff;border-radius:6px;background:#f0eeff;color:#4e4aaf}</style>
+        <h1>CheckClaude 浏览器指纹检测</h1>
+        <p id="s">正在采集…</p>
+        <div id="d"></div>
+        <div id="f" style="display:none">
+          <p>这些信号已回传到本机的 CheckClaude，用于评估 claude.ai 网页端登录时的环境画像。
+             <b>完整体检结果请看菜单栏的 CheckClaude 图标。</b></p>
+          <p class="mute">检测在本机完成，数据不经过任何服务器，也不会被保存到本机以外的地方。</p>
+          <p class="mute"><span id="cd"></span> <button id="keep">保持打开</button></p>
+        </div>
+        <script>
+        (async () => {
+          const o = {};
+          const set = (k, v) => { o[k] = String(v == null ? "" : v).replace(/\\n/g, " "); };
+          try {
+            set("languages", (navigator.languages || []).join(","));
+            const ro = Intl.DateTimeFormat().resolvedOptions();
+            set("tz", ro.timeZone); set("locale", ro.locale);
+            set("tzoffset", -new Date().getTimezoneOffset() / 60);
+            set("platform", navigator.platform); set("hw", navigator.hardwareConcurrency);
+            // 高熵 Client Hints: 只有 Chromium 有，能拿到真实平台版本和品牌列表
+            if (navigator.userAgentData) {
+              set("uad_mobile", navigator.userAgentData.mobile);
+              set("uad_platform", navigator.userAgentData.platform);
+              try {
+                const h = await navigator.userAgentData.getHighEntropyValues(
+                  ["platformVersion", "architecture", "fullVersionList"]);
+                set("uad_platform_version", h.platformVersion);
+                set("uad_arch", h.architecture);
+                set("uad_brands", (h.fullVersionList || []).map(b => b.brand + " " + b.version).join("; "));
+              } catch (e) {}
+            }
+            try {
+              const c = document.createElement("canvas"), x = c.getContext("2d");
+              x.textBaseline = "top"; x.font = "14px Arial"; x.fillText("Claude环境检测", 2, 2);
+              const d = c.toDataURL(); let h = 0;
+              for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) | 0;
+              set("canvas", (h >>> 0).toString(16));
+            } catch (e) {}
+            try {
+              const gl = document.createElement("canvas").getContext("webgl");
+              const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+              set("webgl", gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+              set("webgl_vendor", gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL));
+            } catch (e) {}
+            try {
+              const c = document.createElement("canvas"), x = c.getContext("2d");
+              x.font = "16px sans-serif";
+              set("emojiw", Math.round(x.measureText("\\u{1F600}").width * 10) / 10);
+            } catch (e) {}
+            try {
+              const probe = ["PingFang SC","Hiragino Sans GB","Microsoft YaHei","SimSun","Songti SC","STHeiti","Noto Sans CJK SC"];
+              const sp = document.createElement("span");
+              sp.style.cssText = "position:absolute;left:-9999px;font-size:72px";
+              sp.textContent = "mmmmmmmmmmlli测试";
+              document.body.appendChild(sp);
+              sp.style.fontFamily = "monospace"; const base = sp.offsetWidth;
+              set("fonts", probe.filter(f => { sp.style.fontFamily = "'" + f + "',monospace"; return sp.offsetWidth !== base; }).join(","));
+              sp.remove();
+            } catch (e) {}
+            // WebRTC: UDP 不经 HTTP 代理，能暴露代理没兜住的真实出口
+            try {
+              const pc = new RTCPeerConnection({ iceServers: [
+                { urls: "stun:stun.cloudflare.com:3478" }, { urls: "stun:stun.l.google.com:19302" }] });
+              pc.createDataChannel("p");
+              const hosts = new Set(), srflx = new Set();
+              pc.onicecandidate = e => {
+                if (!e.candidate) return;
+                const c = e.candidate.candidate;
+                const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
+                if (!m) return;
+                if (c.indexOf("typ host") >= 0) hosts.add(m[1]);
+                if (c.indexOf("typ srflx") >= 0) srflx.add(m[1]);
+              };
+              await pc.setLocalDescription(await pc.createOffer());
+              await new Promise(r => setTimeout(r, 4500));
+              set("rtc_host", [...hosts].join(",")); set("rtc_srflx", [...srflx].join(","));
+              pc.close();
+            } catch (e) {}
+          } catch (e) { set("error", e); }
+          const body = Object.keys(o).map(k => k + "=" + o[k]).join("\\n");
+          try {
+            await fetch("/r?t=\(token)", { method: "POST", body });
+            document.getElementById("s").innerHTML = '<span class="ok">✓ 采集完成</span>';
+            // 把采到的东西摊开给用户看 —— 页面自动消失会让人不知道刚才发生了什么
+            const rows = [
+              ["浏览器", o.uad_brands || navigator.userAgent],
+              ["平台", (o.uad_platform || navigator.platform) + (o.uad_platform_version ? " " + o.uad_platform_version : "")],
+              ["Client Hints", navigator.userAgentData ? "已获取（Chromium）" : "该浏览器不提供（Safari / Firefox）"],
+              ["时区 / 语言", o.tz + " · " + o.languages],
+              ["WebRTC 出口", o.rtc_srflx ? o.rtc_srflx : "无泄漏（未拿到公网候选）"],
+              ["渲染环境", o.webgl || "未取到"],
+              ["中文字体", o.fonts ? o.fonts.split(",").length + " 种" : "无"],
+            ];
+            document.getElementById("d").innerHTML =
+              "<table>" + rows.map(r => "<tr><th>" + r[0] + "</th><td>" + r[1] + "</td></tr>").join("") + "</table>";
+            document.getElementById("f").style.display = "block";
+            // 10 秒倒计时后自动关闭，中途可以按住不关 —— 立刻消失会让人不知道发生了什么，
+            // 一直留着又是垃圾标签页
+            let n = 10, stopped = false;
+            const cd = document.getElementById("cd");
+            const keep = document.getElementById("keep");
+            keep.onclick = () => { stopped = true; cd.textContent = "已取消自动关闭，可手动关闭本页。"; keep.style.display = "none"; };
+            const t = setInterval(() => {
+              if (stopped) { clearInterval(t); return; }
+              if (n <= 0) {
+                clearInterval(t);
+                window.close();
+                // 浏览器只允许脚本关闭自己开的窗口，关不掉就说清楚
+                setTimeout(() => { cd.textContent = "可以关闭这个标签页了。"; keep.style.display = "none"; }, 500);
+                return;
+              }
+              cd.textContent = "本页将在 " + n + " 秒后自动关闭";
+              n--;
+            }, 1000);
+          } catch (e) {
+            document.getElementById("s").innerHTML = '<span class="err">回传失败：' + e + '</span>';
+          }
+        })();
+        </script>
+        """
+    }
+}
+
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)   // 不在 Dock 显示

@@ -208,6 +208,20 @@ namespace CheckClaude
             "114.114.114.114","114.114.115.115","223.5.5.5","223.6.6.6","119.29.29.29",
             "182.254.116.116","180.76.76.76","117.50.10.10","1.2.4.8","210.2.4.8" };
 
+        // 重点地区的具体情况，比笼统一句"不在服务范围"有用
+        public static string RegionNote(string cc)
+        {
+            switch ((cc ?? "").ToUpperInvariant())
+            {
+                case "CN": return "中国大陆：Anthropic 未在此开放服务，登录、订阅与 API 申请均会被拒";
+                case "HK": case "MO": return "港澳：不在 Anthropic 支持地区列表内，与大陆同样不可用";
+                case "RU": case "BY": return "俄罗斯/白俄罗斯：受制裁限制，服务与订阅不可用";
+                case "IR": case "KP": case "CU": case "SY": return "受美国制裁地区，Anthropic 服务完全不可用";
+                case "VE": return "委内瑞拉：不在支持地区列表内";
+                default: return "该地区不在 Anthropic 支持列表内";
+            }
+        }
+
         public static bool IsUnsupported(string cc) { return cc != null && UnsupportedCc.Contains(cc.ToUpperInvariant()); }
         public static bool IsSupported(string cc) { return cc != null && SupportedCc.Contains(cc.ToUpperInvariant()); }
 
@@ -536,16 +550,16 @@ namespace CheckClaude
 
             // A. 出口地区与服务可用 (35)
             if (string.IsNullOrEmpty(f.Country))
-                r.Sig("出口", "出口国家", 15, 50, "未知", "换到 US / JP / SG 等支持地区的节点",
+                r.Sig("出口", "出口国家", 14, 50, "未知", "换到 US / JP / SG 等支持地区的节点",
                     "出口 IP 归属地未知(IP 情报接口不可达)", "检查网络后重新体检");
             else if (Collector.IsUnsupported(f.Country))
-                r.Sig("出口", "出口国家", 15, 0, f.Country + " 不支持", "换到 US / JP / SG 等支持地区的节点",
+                r.Sig("出口", "出口国家", 14, 0, f.Country + " 不支持", "换到 US / JP / SG 等支持地区的节点",
                     "出口国家 " + f.Country + " 不在 Anthropic 服务范围，登录/订阅/API 均有封号风险",
                     "切到美国/日本/新加坡等支持地区节点，并长期固定");
             else if (Collector.IsSupported(f.Country))
-                r.Sig("出口", "出口国家", 15, 100, f.Country + " " + (f.City ?? ""), null);
+                r.Sig("出口", "出口国家", 14, 100, f.Country + " " + (f.City ?? ""), null);
             else
-                r.Sig("出口", "出口国家", 15, 66, f.Country + " 支持未知", "换到 US / JP / SG 等已知支持地区的节点",
+                r.Sig("出口", "出口国家", 14, 66, f.Country + " 支持未知", "换到 US / JP / SG 等已知支持地区的节点",
                     "出口国家 " + f.Country + " 支持情况未知", "建议改用 US/JP/SG 等已知支持地区节点");
 
             if (f.ApiCode == 401 || f.ApiCode == 400)
@@ -607,13 +621,13 @@ namespace CheckClaude
 
             // B. 出口质量 (12)
             if (f.Proxy)
-                r.Sig("质量", "IP 类型", 5, 25, "公开代理/VPN", "换独享节点或住宅 IP",
+                r.Sig("质量", "IP 类型", 4, 25, "公开代理/VPN", "换独享节点或住宅 IP",
                     "出口 IP 被标记为公开代理/VPN 出口，属高风控段", "换独享节点或住宅 IP");
             else if (f.Hosting == 1)
-                r.Sig("质量", "IP 类型", 5, 50, "机房 IDC", "换住宅 / 家宽节点",
+                r.Sig("质量", "IP 类型", 4, 50, "机房 IDC", "换住宅 / 家宽节点",
                     "出口是机房(IDC) IP: " + f.Isp + "，风控强度高于住宅", "有条件换住宅/家宽节点");
-            else if (f.Hosting == 0) r.Sig("质量", "IP 类型", 5, 100, "住宅", null);
-            else r.Sig("质量", "IP 类型", 5, 70, "未知", "重新体检");
+            else if (f.Hosting == 0) r.Sig("质量", "IP 类型", 4, 100, "住宅", null);
+            else r.Sig("质量", "IP 类型", 4, 70, "未知", "重新体检");
 
             if (!string.IsNullOrEmpty(f.CfLoc) && !string.IsNullOrEmpty(f.Country))
             {
@@ -743,13 +757,20 @@ namespace CheckClaude
 
             // F. 浏览器画像 (15) —— Windows 版不带 WebView2 依赖，按中性 70% 计分，不假装测过
             r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            r.Sig("浏览器", "浏览器时区", 4, 70, "未采集", "Windows 版暂不采集浏览器信号");
+            r.Sig("浏览器", "浏览器时区", 3, 70, "未采集", "Windows 版暂不采集浏览器信号");
             r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
             // 1 分的项不值得因为"没测"就扣成 0/1，那看起来像 bug
             r.Sig("浏览器", "Intl 区域设置", 1, 100, "未采集", null);
+            // 这两项要真实浏览器才拿得到(Windows 版暂无浏览器桥接)，按中性计分不误判
+            r.Sig("浏览器", "Client Hints", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
+            r.Sig("浏览器", "HTTP 语言首标", 1, 100, "未采集", null);
             r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
 
-            if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
+            // 出口落在不服务地区是硬性阻断: 国内直连的画像其实很自洽(中文+国内IP+国内时区全一致)，
+            // 不能让这些一致性得分把它抬进"基本可用"
+            if (Collector.IsUnsupported(f.Country))
+            { r.Grade = "高风险"; r.Verdict = Collector.RegionNote(f.Country); }
+            else if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
             else if (r.Score >= 70) { r.Grade = "良好"; r.Verdict = "基本可用，建议修复下列项"; }
             else if (r.Score >= 50) { r.Grade = "风险"; r.Verdict = "存在明显矛盾信号，有封号风险"; }
             else { r.Grade = "高风险"; r.Verdict = "不建议在当前环境登录或使用 Claude"; }
