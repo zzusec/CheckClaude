@@ -55,9 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 定时主动检测(默认 1 分钟，可在菜单"检测间隔"调整)
         startScanTimer()
-        // 版本检查: 启动时一次，之后每 6 小时。频率再高对 GitHub 也不礼貌
+        // 版本检查: 启动时一次，之后每 2 小时。GitHub API 匿名限额 60 次/小时，这个频率很安全
         runScript(["--check"], upgradeScriptPath)
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in
             self?.runScript(["--check"], upgradeScriptPath)
         }
     }
@@ -443,7 +443,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         notify("CheckClaude 有新版本 v\(latest)", "点菜单栏图标 →「升级到 v\(latest)」一键更新")
     }
 
-    @objc func checkUpdate() { runScript(["--check"], upgradeScriptPath) }
+    // 点了必须有回音 —— 之前静默执行，已是最新时看着就像"点了没反应"
+    @objc func checkUpdate() {
+        notify("正在检查更新…", "")
+        runScript(["--check"], upgradeScriptPath) { [weak self] in
+            guard let self else { return }
+            let u = self.readStatus(updatePath)
+            if u["hasupdate"] == "1", let l = u["latest"] {
+                self.notify("发现新版本 v\(l)", "点菜单栏「⬆ 升级到 v\(l)」一键更新")
+            } else {
+                self.notify("已经是最新版本", "v\(u["current"] ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"))")
+            }
+            self.refresh()
+        }
+    }
     @objc func doUpgrade() { runScript(["--install"], upgradeScriptPath) }
 
     @objc func openYinso() {
