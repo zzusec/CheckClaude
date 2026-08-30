@@ -94,7 +94,7 @@ check "点名 UDP 绕过代理" "$(echo "$ISSUES" | grep -c 'UDP 绕过了代理
 
 echo "⑪ 浏览器信号没采集到 => 给部分分而不是判零"
 base_signals; BR_OK=0; compute_score
-check "浏览器组拿到 8/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 8
+check "浏览器组拿到 9/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 9
 check "不产生误报问题" "$(echo "$ISSUES" | grep -c 浏览器)" 0
 
 echo "⑫ TUN 全局下 DNS 走隧道，不该按泄漏扣满分"
