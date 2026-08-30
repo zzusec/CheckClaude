@@ -28,6 +28,8 @@ func script(_ name: String) -> String {
 }
 let scriptPath = script("auto-timezone")
 let claudeScriptPath = script("claude-check")
+let upgradeScriptPath = script("upgrade")
+let updatePath = (baseDir as NSString).appendingPathComponent("update_status")
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -35,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var scanTimer: Timer?
     var lastExitIP = ""      // 出口 IP 变化时才重跑 Claude 环境体检
     var probe: BrowserProbe?
+    var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.menu = NSMenu()
@@ -49,6 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 定时主动检测(默认 1 分钟，可在菜单"检测间隔"调整)
         startScanTimer()
+        // 版本检查: 启动时一次，之后每 6 小时。频率再高对 GitHub 也不礼貌
+        runScript(["--check"], upgradeScriptPath)
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            self?.runScript(["--check"], upgradeScriptPath)
+        }
     }
 
     // 当前检测间隔(秒)，默认 60
@@ -166,7 +174,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(action("打开日志", #selector(openLog)))
         menu.addItem(.separator())
         let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        menu.addItem(disabled("版本 v\(ver)"))
+        let u = readStatus(updatePath)
+        if u["hasupdate"] == "1", let latest = u["latest"] {
+            menu.addItem(disabled("版本 v\(ver)"))
+            menu.addItem(colored("⬆ 升级到 v\(latest)", .systemBlue, #selector(doUpgrade)))
+            notifyNewVersion(latest)
+        } else {
+            menu.addItem(disabled("版本 v\(ver)（已是最新）"))
+            menu.addItem(action("检查更新", #selector(checkUpdate)))
+        }
+        menu.addItem(.separator())
+        menu.addItem(disabled("本公司其他产品"))
         menu.addItem(action("叮叮提醒 — 重要的事，我来帮你记着", #selector(openYinso)))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
@@ -311,6 +329,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
     @objc func runCheck() { runScript(["--once"]) }
+
+    // 同一个新版本只弹一次，别每 30 秒重画菜单就骚扰一遍
+    func notifyNewVersion(_ latest: String) {
+        let key = "notifiedVersion"
+        guard UserDefaults.standard.string(forKey: key) != latest else { return }
+        UserDefaults.standard.set(latest, forKey: key)
+        notify("CheckClaude 有新版本 v\(latest)", "点菜单栏图标 →「升级到 v\(latest)」一键更新")
+    }
+
+    @objc func checkUpdate() { runScript(["--check"], upgradeScriptPath) }
+    @objc func doUpgrade() { runScript(["--install"], upgradeScriptPath) }
 
     @objc func openYinso() {
         NSWorkspace.shared.open(URL(string: "https://www.yinso.com")!)
