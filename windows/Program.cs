@@ -877,6 +877,15 @@ namespace CheckClaude
                         f.BrAccept.Length > 24 ? f.BrAccept.Substring(0, 24) : f.BrAccept, null);
             }
 
+            // 关键项一票否决: 这几项任一不满分，总分再高也不能算"可用"。
+            // 90 分可能是"丢了 10 分轻微项"，也可能是"WebRTC 泄漏 6 分 + 时区不符 5 分"，
+            // 后者真实出口已经暴露，风险天差地别。
+            var critical = new[] { "出口国家", "Anthropic API 可达", "系统时区匹配出口",
+                                   "WebRTC 出口", "IPv6 出口", "三路出口一致" };
+            var critFail = string.Join("、", r.Signals
+                .Where(x => critical.Contains(x.Label) && x.Points < x.Weight)
+                .Select(x => x.Label).ToArray());
+
             if (Collector.IsUnsupported(f.Country))
             { r.Grade = "高风险"; r.Verdict = Collector.RegionNote(f.Country); }
             // 三路出口不一致 = 分流模式，账号画像在多地区间跳变，是风控最敏感的信号之一。
@@ -888,7 +897,12 @@ namespace CheckClaude
                           + ")，账号画像会在多地区间跳变，不建议使用";
             }
             // 档位措辞按二元标准: 只有绿档说"可用"，其余一律明说"不建议使用"
-            else if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
+            else if (r.Score >= 90 && critFail.Length == 0) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
+            else if (critFail.Length > 0)
+            {
+                r.Grade = r.Score < 50 ? "危险" : r.Score < 70 ? "高风险" : "有风险";
+                r.Verdict = "关键项未达标（" + critFail + "），不建议使用 Claude";
+            }
             else if (r.Score >= 70) { r.Grade = "有风险"; r.Verdict = "存在矛盾信号，不建议使用 Claude，先按提示修复"; }
             else if (r.Score >= 50) { r.Grade = "高风险"; r.Verdict = "多项信号冲突，不建议在当前环境登录或使用 Claude"; }
             else { r.Grade = "危险"; r.Verdict = "环境画像严重冲突，使用 Claude 有较高封号风险"; }
@@ -1139,7 +1153,7 @@ namespace CheckClaude
         static Color ScoreColor(int score, bool consistent)
         {
             if (score < 0) return Color.Gray;
-            if (score >= 85 && consistent) return Color.FromArgb(52, 199, 89);
+            if (score >= 90 && consistent) return Color.FromArgb(52, 199, 89);
             if (score >= 70 && consistent) return Color.FromArgb(255, 149, 0);
             return Color.FromArgb(255, 59, 48);
         }
@@ -1149,7 +1163,7 @@ namespace CheckClaude
         void AlertIfUnsafe(int score, bool consistent, string verdict)
         {
             if (score < 0) return;
-            string tier = (score >= 85 && consistent) ? "safe"
+            string tier = (score >= 90 && consistent) ? "safe"
                         : (score >= 70 && consistent) ? "warn" : "unsafe";
             string prev = lastSafetyTier;
             lastSafetyTier = tier;
