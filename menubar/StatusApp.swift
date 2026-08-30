@@ -172,6 +172,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(disabled(sc >= 100 ? "⚡ 一键修复（已满分，无需修复）"
                                             : "⚡ 一键修复（剩余项需手动处理）"))
         }
+
+        // 手动处理步骤常驻菜单: 修复弹窗是一次性的，关掉就找不回来了
+        let autoFixable = ["系统时区匹配出口", "DNS 出口", "代理形态"]
+        let manual = (c["gains"] ?? "").split(separator: "|").map(String.init).compactMap { g -> [String]? in
+            let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 3, !autoFixable.contains(f[0]) else { return nil }
+            return f
+        }
+        if !manual.isEmpty {
+            let mi = NSMenuItem(title: "📋 手动处理步骤（\(manual.count) 项）", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for f in manual {
+                sub.addItem(colored("\(f[0])   +\(f[1]) 分", .labelColor))
+                // 步骤按分号折行，太长的菜单项会被系统截断
+                for (i, part) in f[2].components(separatedBy: "；").enumerated() {
+                    sub.addItem(disabled("      \(i == 0 ? "" : "或 ")\(part)"))
+                }
+                sub.addItem(.separator())
+            }
+            sub.addItem(action("重新体检", #selector(runClaudeCheck)))
+            mi.submenu = sub
+            menu.addItem(mi)
+        }
         menu.addItem(.separator())
         menu.addItem(action("立即检测", #selector(runCheck)))
         // 检测间隔子菜单
