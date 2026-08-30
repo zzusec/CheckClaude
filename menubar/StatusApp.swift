@@ -208,7 +208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = readStatus(claudeStatusPath)
         let score = Int(c["score"] ?? "") ?? -1
         let dot = score < 0 ? "⚪️" : (score >= 85 ? "🟢" : score >= 70 ? "🟡" : score >= 50 ? "🟠" : "🔴")
-        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
+        var title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
+        if score >= 0 && score < 100 { title += "（还能提 \(100 - score) 分）" }
 
         let sub = NSMenu()
         if score < 0 {
@@ -233,6 +234,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(disabled("系统: \(c["os"] ?? "?") · \(c["locale"] ?? "?") · \(c["proxymode"] ?? "?")"))
             sub.addItem(disabled("DNS: \(c["dns"] ?? "?") · claude.ai → \(c["dnsresult"] ?? "?")"))
             sub.addItem(disabled("CLI: \(c["claudever"] ?? "?") · 接口 \(c["base"] ?? "?")"))
+            // 提分清单: 每项差几分、下一步做什么，按差值降序
+            let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
+            sub.addItem(.separator())
+            if gains.isEmpty {
+                sub.addItem(disabled("🎉 已满分，没有可提升项"))
+            } else {
+                sub.addItem(disabled("── 还能提 \(100 - score) 分 ──"))
+                for g in gains {
+                    let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+                    guard f.count >= 3 else { continue }
+                    sub.addItem(disabled("＋\(f[1])  \(f[0])：\(f[2])"))
+                }
+            }
             let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
             let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
             if !issues.isEmpty {

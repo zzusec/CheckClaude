@@ -474,6 +474,56 @@ compute_score() {
   fi
 }
 
+
+# 每项没拿满分时，具体做什么能把分补回来。issues/fixes 说的是"有什么问题"，
+# 这里说的是"下一步动手做什么"，菜单里按差值从大到小排给用户看。
+gain_hint() {
+  case "$1" in
+    "出口国家")          echo "换到 US / JP / SG 等支持地区的节点" ;;
+    "Anthropic API 可达") echo "开全局代理，确认能直连 api.anthropic.com" ;;
+    "claude.ai 可达")     echo "换干净节点，确认浏览器能打开 claude.ai" ;;
+    "多源情报一致")      echo "换一个归属明确、情报干净的节点" ;;
+    "IP 类型")           echo "换住宅 / 家宽节点，别用机房 IP" ;;
+    "边缘机房匹配")      echo "换地理归属真实的节点" ;;
+    "出口链路单一")      echo "别叠多层代理，统一走同一个出口" ;;
+    "三路出口一致")      echo "代理切全局模式，三路走同一出口" ;;
+    "系统时区匹配出口")  echo "点「一键修复」即可自动改" ;;
+    "时区偏移自洽")      echo "清掉 shell 里的 TZ 环境变量后重开终端" ;;
+    "系统区域匹配出口")  echo "菜单里点「把系统区域改为 XX」" ;;
+    "代理形态")          echo "代理开 TUN / 虚拟网卡模式，关掉 PAC 分流" ;;
+    "出口稳定性")        echo "固定一个节点，24 小时内别切线路(到点自动回满)" ;;
+    "运行容器")          echo "在物理机上登录和使用，别在虚拟机里" ;;
+    "claude.ai 解析")     echo "换 DNS 或让代理接管 DNS" ;;
+    "DNS 出口")          echo "点「一键修复」自动换成验证过的境外 DNS" ;;
+    "WebRTC 出口")       echo "代理开 TUN 模式接管 UDP，或浏览器禁用 WebRTC" ;;
+    "浏览器时区")        echo "重启浏览器，让它重新读系统时区" ;;
+    "浏览器语言")        echo "把浏览器首选语言调成 en-US" ;;
+    "渲染环境")          echo "从菜单栏 App 体检(命令行单跑拿不到浏览器信号)" ;;
+    *)                   echo "重新体检" ;;
+  esac
+}
+
+# 未满分项 -> "标签~差值~动作"，按差值降序。菜单和报告都用它。
+build_gains() {
+  GAINS=""
+  local row g l w p v diff hint
+  local sorted
+  sorted=$(for row in "${SIGNALS[@]}"; do
+    IFS='~' read -r g l w p v <<<"$row"
+    diff=$((w - p)); [[ $diff -le 0 ]] && continue
+    echo "$diff~$l~$v"
+  done | sort -rn -t'~' -k1)
+  while IFS='~' read -r diff l v; do
+    [[ -z "$diff" ]] && continue
+    if [[ "$v" == *未采集* ]]; then
+      hint="从菜单栏 App 点「重新体检」(命令行单跑没有浏览器信号)"
+    else
+      hint=$(gain_hint "$l")
+    fi
+    GAINS+="${GAINS:+|}${l}~${diff}~${hint}"
+  done <<<"$sorted"
+}
+
 # ── 自动修复 ────────────────────────────────────────────────────
 notify() { osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1; }
 
@@ -650,6 +700,7 @@ write_cstatus() {
     echo "fixlist=$(fixable_list)"
     echo "needsudo=${NEED_SUDO:-0}"
     echo "signals=$(IFS=';'; echo "${SIGNALS[*]}")"
+    echo "gains=$GAINS"
     echo "issues=$ISSUES"; echo "fixes=$FIXES"
   } >"$CSTATUS" 2>/dev/null || true
 }
@@ -679,6 +730,14 @@ print_report() {
   else
     echo "  浏览 未采集(浏览器信号由菜单栏 App 的隐藏 WebView 提供，命令行单跑时没有)"
   fi
+  if [[ -n "$GAINS" ]]; then
+    echo ""
+    echo "  还能提 $((100 - SCORE)) 分"
+    echo "$GAINS" | tr '|' '\n' | while IFS='~' read -r l d h; do
+      [[ -z "$l" ]] && continue
+      printf "    +%-3s %-18s %s\n" "$d" "$l" "$h"
+    done
+  fi
   if [[ -n "$ISSUES" ]]; then
     echo ""; echo "  发现的问题"
     echo "$ISSUES" | tr '|' '\n' | sed 's/^/    • /'
@@ -705,6 +764,7 @@ main() {
     local before=$SCORE
     apply_fixes
     parse_dns              # DNS 改动后重新采集
+    parse_system           # 代理形态可能也变了
     compute_score          # 修完重新打分
     if [[ "${NEED_SUDO:-0}" == "1" ]]; then
       notify "修复需要授权" "先运行一次 sudo bash enable-auto-timezone.sh"
@@ -716,6 +776,7 @@ main() {
       notify "体检完成" "${SCORE} 分$( [[ -n "$(fixable_list)" ]] && echo "，剩余待处理: $(fixable_list)" )"
     fi
   fi
+  build_gains
   write_cstatus
   [[ "$MODE" != "quiet" ]] && print_report
   log "claude-check: ${SCORE}/100 ${GRADE} country=${COUNTRY:-?} api=${API_CODE} dns=${DNS_VERDICT}"
