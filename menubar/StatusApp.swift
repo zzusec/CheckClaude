@@ -176,6 +176,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         i.isEnabled = false
         return i
     }
+    // disabled 项的 attributedTitle 会被系统统一压成灰色，所以要上色就必须是 enabled 的，
+    // 没有实际动作的就绑一个空 selector。
+    func colored(_ t: String, _ color: NSColor, _ sel: Selector? = nil) -> NSMenuItem {
+        let i = NSMenuItem(title: t, action: sel ?? #selector(noop), keyEquivalent: "")
+        i.target = self
+        i.attributedTitle = NSAttributedString(string: t, attributes: [
+            .foregroundColor: color,
+            .font: NSFont.menuFont(ofSize: 0)
+        ])
+        return i
+    }
+    @objc func noop() {}
+
     func action(_ t: String, _ sel: Selector) -> NSMenuItem {
         let i = NSMenuItem(title: t, action: sel, keyEquivalent: "")
         i.target = self
@@ -216,6 +229,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(disabled("尚未体检"))
         } else {
             sub.addItem(disabled(c["verdict"] ?? ""))
+
+            // 提分清单放最前面，橙色可点，别埋在明细里跟着一起变灰
+            let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
+            sub.addItem(.separator())
+            if gains.isEmpty {
+                sub.addItem(colored("🎉 已满分，没有可提升项", .systemGreen))
+            } else {
+                sub.addItem(colored("还能提 \(100 - score) 分", .systemOrange))
+                let fixableNames = ["系统时区匹配出口", "DNS 出口", "代理形态"]
+                for g in gains {
+                    let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+                    guard f.count >= 3 else { continue }
+                    // 能一键修的项，点它就直接修
+                    let canFix = c["fixable"] == "1" && fixableNames.contains(f[0])
+                    let mark = canFix ? "⚡" : "＋\(f[1])"
+                    sub.addItem(colored("   \(mark)  \(f[0])：\(f[2])", .systemOrange,
+                                        canFix ? #selector(runClaudeFix) : nil))
+                }
+            }
             // 14 项信号，按 出口/质量/画像/DNS 分组展示: 分组~标签~权重~得分~值
             var group = ""
             for row in (c["signals"] ?? "").split(separator: ";") {
@@ -234,19 +266,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(disabled("系统: \(c["os"] ?? "?") · \(c["locale"] ?? "?") · \(c["proxymode"] ?? "?")"))
             sub.addItem(disabled("DNS: \(c["dns"] ?? "?") · claude.ai → \(c["dnsresult"] ?? "?")"))
             sub.addItem(disabled("CLI: \(c["claudever"] ?? "?") · 接口 \(c["base"] ?? "?")"))
-            // 提分清单: 每项差几分、下一步做什么，按差值降序
-            let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
-            sub.addItem(.separator())
-            if gains.isEmpty {
-                sub.addItem(disabled("🎉 已满分，没有可提升项"))
-            } else {
-                sub.addItem(disabled("── 还能提 \(100 - score) 分 ──"))
-                for g in gains {
-                    let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
-                    guard f.count >= 3 else { continue }
-                    sub.addItem(disabled("＋\(f[1])  \(f[0])：\(f[2])"))
-                }
-            }
             let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
             let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
             if !issues.isEmpty {
