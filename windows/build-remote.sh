@@ -7,12 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${WIN_HOST:-win-ding}"
-VER="${1:-2.1}"
+VER="${1:-3.1}"
 REMOTE="C:/Users/hx10/checkclaude-build"
 
 echo "==> 版本 ${VER}，同步源码到 $HOST"
 ssh "$HOST" "if not exist \"$REMOTE\" mkdir \"$REMOTE\"" >/dev/null 2>&1 || true
-scp -q Program.cs build.ps1 "$HOST:$REMOTE/"
+scp -q Program.cs BrowserBridge.cs build.ps1 "$HOST:$REMOTE/"
 
 echo "==> 远程编译"
 ssh "$HOST" "powershell -ExecutionPolicy Bypass -File $REMOTE/build.ps1 -Version $VER"

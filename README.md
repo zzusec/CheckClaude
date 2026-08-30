@@ -2,8 +2,8 @@
 
 **检查这台机器适不适合跑 Claude**，并把能自动修的直接修掉。附带按出口 IP 自动设置 macOS 系统时区。
 
-菜单栏常驻，20 项加权信号打分（0–100），列出问题、差几分、下一步做什么；时区、DNS 泄漏、PAC 分流可以一键修复。
-只依赖系统自带工具（bash + Swift），无第三方运行时依赖，不要账号，不上传任何数据。
+菜单栏/托盘常驻，26 项加权信号打分（0–100），列出问题、差几分、下一步做什么；时区、DNS 泄漏、PAC 分流可以一键修复。
+只依赖系统自带能力，无第三方运行时依赖，不要账号，不上传任何数据。
 
 ```
 Claude 环境 🟢 98 分 · 优秀
@@ -25,10 +25,11 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
-两端同一套评分模型（20 项加权信号，合计 100）。Windows 版的浏览器 4 项按中性 70% 计分——
-单文件 exe 带不了 WebView2 依赖，和 macOS 命令行单跑是同一口径，不假装测过。
+两端使用同一套评分模型（26 项加权信号，合计 100）。完整体检会通过本机回环地址打开系统默认浏览器，
+采集 WebRTC、Intl、Client Hints、HTTP 语言首标、WebGL、Canvas 和字体等真实浏览器信号；数据只回传给本机 CheckClaude。
+命令行单跑没有浏览器上下文，浏览器组按中性分计入，不假装测过。
 
-Windows 版是 .NET Framework 4.8（系统预装）+ `csc.exe` 编译的单个 49KB exe，托盘常驻。
+Windows 版是 .NET Framework 4.8（Windows 10/11 系统自带）+ `csc.exe` 编译的单个 exe，托盘常驻。
 修改系统时区和 DNS 需要管理员权限，点「一键修复」时会弹一次 UAC。
 
 ```
@@ -65,11 +66,13 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 文件 | 作用 |
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
-| `claude-check.sh` | Claude 运行环境体检：20 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
-| `test-claude-check.sh` | 体检评分逻辑自测（不联网） |
+| `claude-check.sh` | Claude 运行环境体检：26 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
+| `test-claude-check.sh` | macOS 体检评分逻辑自测（不联网） |
 | `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级 |
-| `windows/Program.cs` | Windows 版全部实现（托盘 + 检测 + 修复 + 升级），单文件 C# |
-| `windows/build-remote.sh` | 在 Mac 上一条命令远程编译出 Windows 产物 |
+| `windows/Program.cs` | Windows 版托盘、检测、修复和升级主逻辑 |
+| `windows/BrowserBridge.cs` | Windows 真实浏览器指纹本地桥接 |
+| `windows/BrowserBridgeTests.cs` | Windows 浏览器桥接自动测试 |
+| `windows/build-remote.sh` / `windows/test-remote.sh` | 在 Mac 上远程构建并测试 Windows 产物 |
 | `com.hx10.checkclaude-daemon.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
 | `menubar/CheckClaude.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
 | `menubar/*.plist` | 菜单栏 App 的开机自启 LaunchAgent |
@@ -102,17 +105,17 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 ~/CheckClaude/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
 ```
 
-共 **24 项加权信号**，合计 100 分，分 6 组：
+共 **26 项加权信号**，合计 100 分，分 6 组：
 
 | 组 | 信号 | 权重 | 说明 |
 |---|---|---|---|
-| 出口 | 出口国家 | 15 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
+| 出口 | 出口国家 | 14 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
 | 出口 | Anthropic API 可达 | 10 | 返回 401 为正常；403 = 出口被地区拦截 |
 | 出口 | **IPv6 出口** | 3 | 代理只接管 IPv4 时，IPv6 直连会暴露真实地区 |
 | 出口 | 多源情报一致 | 3 | 两家 IP 情报库对该出口判定是否冲突 |
 | 出口 | claude.ai 可达 | 2 | 测 `robots.txt`——主页对裸 curl 一律 403，那是 bot 挑战 |
 | 出口 | **anthropic.com 可达** | 2 | 官网与 API 走不同前端，分开测才能区分整体被拦与单点异常 |
-| 质量 | IP 类型 | 5 | 住宅 / 机房 IDC / 公开代理 |
+| 质量 | IP 类型 | 4 | 住宅 / 机房 IDC / 公开代理 |
 | 质量 | 边缘机房匹配 | 3 | Cloudflare 落地机房与 IP 库归属是否一致 |
 | 质量 | 出口链路单一 | 3 | CF 看到的来源 ≠ 检测到的出口 = 多层嵌套代理 |
 | 画像 | 三路出口一致 | 6 | 分流 / PAC 会让画像在多地区间跳变 |
@@ -126,20 +129,19 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 稳定 | 代理形态 | 3 | TUN 全局 / 系统代理 / **PAC 分流**，可一键修复 |
 | 稳定 | 运行容器 | 3 | 物理机 / 虚拟机 |
 | 浏览器 | WebRTC 出口 | 6 | **UDP 不走 HTTP 代理**，能暴露代理没兜住的真实出口 |
-| 浏览器 | 浏览器时区 | 4 | Intl 时区与系统时区是否一致 |
+| 浏览器 | 浏览器时区 | 3 | Intl 时区与系统时区是否一致 |
 | 浏览器 | 浏览器语言 | 2 | `navigator.languages` 与出口地区是否矛盾 |
 | 浏览器 | 渲染环境 | 2 | WebGL 渲染器 / Canvas 指纹 / 中文字体探测 |
 | 浏览器 | **Intl 区域设置** | 1 | 浏览器国际化配置与出口地区是否对应 |
+| 浏览器 | **Client Hints** | 2 | Chromium 上报的平台是否与真实系统一致 |
+| 浏览器 | **HTTP 语言首标** | 1 | `Accept-Language` 是否与出口地区明显冲突 |
 
 得分 ≥85 优秀 🟢，70–84 良好 🟡，50–69 风险 🟠，<50 高风险 🔴。
 
-「浏览器」这 4 项由菜单栏 App 内一个**隐藏的 1px WKWebView** 跑检测 JS 采集
-（WebRTC / Intl / Canvas / WebGL / 字体探测），结果写进 `browser_signals` 供脚本读取。
-命令行单跑 `claude-check.sh` 时没有 WebView，这 4 项按中性（70%）计分，分数会略低于菜单栏里显示的。
-
-> 采集用的是 Safari 引擎，指纹与你实际用的 Chrome 不完全一致；它反映的是"这台机器 + 这条网络"的
-> 环境画像，不是某个浏览器的完整指纹。`navigator.userAgentData`（Client Hints）是 Chromium 独有，
-> WKWebView 没有，这项不做。
+菜单栏/托盘里的「重新体检」会打开系统默认浏览器，通过只监听 `127.0.0.1` 的一次性本地桥接采集浏览器组信号。
+URL 带随机 token，结果写进本机 `browser_signals`，完成或超时后监听立即关闭；不经过外部服务器。
+macOS 在默认浏览器回传失败时会回退到内置 WKWebView，Windows 则保留上次一小时内的有效结果或按中性分计入。
+命令行单跑时不会打开浏览器，浏览器组同样按中性分计入。
 
 ### 一键修复
 
@@ -165,7 +167,7 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 ```
 
 菜单栏主菜单里直接有「重新体检」和「⚡ 一键修复：xxx」两个入口。
-「Claude 环境 🟢 98 分（还能提 2 分）」子菜单展开是 20 项明细，末尾是**提分清单**——
+「Claude 环境 🟢 98 分（还能提 2 分）」子菜单展开是 26 项明细，末尾是**提分清单**——
 每个没拿满分的项差几分、下一步具体做什么，按差值从大到小排：
 
 ```
@@ -174,7 +176,7 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 ```
 
 命令行 `claude-check.sh` 的报告里也有同样的「还能提 X 分」区块。
-体检**只在出口 IP 变化或手动点击时触发**，不会每分钟去敲 Anthropic 接口。
+后台按可选间隔（默认 1 分钟）只做轻量三路出口探测；完整 Claude 体检**只在首次启动、出口状态变化或手动点击时触发**，不会每分钟去敲 Anthropic 接口。
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 

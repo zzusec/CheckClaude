@@ -5,7 +5,7 @@
 # 评分模型参考 https://github.com/yacuo/check-cc (MIT)，但那边是浏览器端检测(WebRTC /
 # Client Hints / Emoji 渲染 / 字体探测靠 JS 拿)，这里是 macOS 本地实现: 凡是 shell 能测的
 # 信号全部覆盖(出口/质量/画像/DNS/稳定 共 16 项)，浏览器独有的 4 项(WebRTC 泄漏、浏览器
-# 时区语言、渲染环境)由菜单栏 App 的隐藏 WKWebView 采集后写文件，这里读取，合计 20 项。
+# 时区语言、渲染环境)由菜单栏 App 的浏览器桥接采集后写文件，这里读取，合计 26 项。
 #
 # 用法:
 #   ./claude-check.sh              # 体检并打印报告
@@ -263,7 +263,7 @@ parse_claude() {
     CLAUDE_BASE=$(grep -E '^[[:space:]]*export[[:space:]]+ANTHROPIC_BASE_URL' "$HOME/.zshrc" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ')
 }
 
-# ── 打分: 15 项加权信号，合计 100 ───────────────────────────────
+# ── 打分: 26 项加权信号，合计 100 ───────────────────────────────
 compute_score() {
   SIGNALS=(); SCORE=0; ISSUES=""; FIXES=""; FIXABLE_TZ=""; FIXABLE_LOCALE=""
   local relay=0
@@ -489,7 +489,7 @@ compute_score() {
       "运行在${VM_HOST}中，设备指纹异常是风控关注的信号" "尽量在物理机上登录和使用 Claude"
   fi
 
-  # ── F. 浏览器画像 (15) —— 由菜单栏 App 的隐藏 WKWebView 采集 ──
+  # ── F. 浏览器画像 (17) —— 由菜单栏 App 的真实浏览器桥接采集 ──
   if [[ "$BR_OK" != "1" ]]; then
     # 没采集到就按中性计分(70%)，不能因为"没测"判环境有问题，也不能白送满分。
     # 命令行单跑时没有 WebView，分数会比菜单栏里低几分，属预期。

@@ -1,4 +1,4 @@
-﻿param([string]$Version = "2.1")
+﻿param([string]$Version = "3.1")
 # 用 Windows 自带的 csc.exe 编译，产物是单个 exe，目标机不需要装任何运行时。
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -21,7 +21,7 @@ using System.Reflection;
 $refs = @("System.dll","System.Core.dll","System.Drawing.dll","System.Windows.Forms.dll") -join ","
 $out  = "$here\CheckClaude.exe"
 & $csc /nologo /target:winexe /optimize+ /platform:anycpu /out:"$out" /reference:$refs `
-       /warn:1 "$here\Program.cs" "$here\AssemblyInfo.cs"
+       /warn:1 "$here\Program.cs" "$here\BrowserBridge.cs" "$here\AssemblyInfo.cs"
 if ($LASTEXITCODE -ne 0) { throw "compile failed" }
 
 # zip 里附一份说明，和 macOS dmg 里的使用说明.txt 对应
@@ -30,7 +30,9 @@ $readme = "$here\使用说明.txt"
 CheckClaude for Windows
 
 用法: 双击 CheckClaude.exe，图标出现在右下角托盘区。
-      右键托盘图标查看 20 项检测明细、问题和提分建议。
+      右键托盘图标查看 26 项检测明细、问题和提分建议。
+      点「重新体检」会打开默认浏览器采集真实浏览器信号，
+      数据只经 127.0.0.1 回传到本机，不上传任何服务器。
 
 首次运行如果 SmartScreen 拦截("Windows 已保护你的电脑")，
 点「更多信息」→「仍要运行」。程序未做代码签名，这是预期提示。
