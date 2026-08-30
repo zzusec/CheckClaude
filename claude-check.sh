@@ -45,6 +45,18 @@ SUPPORTED="US CA GB IE DE FR NL SE NO DK FI IT ES PT PL CZ AT CH BE LU JP KR SG 
 # 常见国内公共 DNS，直接用它解析 = DNS 请求泄漏到国内
 CN_DNS="114.114.114.114 114.114.115.115 223.5.5.5 223.6.6.6 119.29.29.29 182.254.116.116 180.76.76.76 117.50.10.10 1.2.4.8 210.2.4.8"
 
+# 重点地区的具体情况，比笼统一句"不在服务范围"有用
+region_note() {
+  case "$1" in
+    CN)          echo "中国大陆：Anthropic 未在此开放服务，登录、订阅与 API 申请均会被拒" ;;
+    HK|MO)       echo "港澳：不在 Anthropic 支持地区列表内，与大陆同样不可用" ;;
+    RU|BY)       echo "俄罗斯/白俄罗斯：受制裁限制，服务与订阅不可用" ;;
+    IR|KP|CU|SY) echo "受美国制裁地区，Anthropic 服务完全不可用" ;;
+    VE)          echo "委内瑞拉：不在支持地区列表内" ;;
+    *)           echo "该地区不在 Anthropic 支持列表内" ;;
+  esac
+}
+
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ── 信号表 ──────────────────────────────────────────────────────
@@ -216,6 +228,7 @@ parse_stability() {
 # ── 采集: 浏览器信号(菜单栏 App 的隐藏 WKWebView 写的) ──────────
 parse_browser() {
   BR_OK=0; BR_TZ=""; BR_LANGS=""; BR_LOCALE=""; BR_RTC=""; BR_RTC_HOST=""
+  BR_SOURCE=""; BR_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""; BR_UAD_PLAT=""
   BR_FONTS=""; BR_WEBGL=""; BR_CANVAS=""; BR_AGE=999999
   local f="$DATA_DIR/browser_signals"
   [[ -f "$f" ]] || return 1
@@ -223,6 +236,8 @@ parse_browser() {
   while IFS='=' read -r k v; do
     case "$k" in
       tz) BR_TZ="$v" ;; languages) BR_LANGS="$v" ;; locale) BR_LOCALE="$v" ;;
+      source) BR_SOURCE="$v" ;; ua) BR_UA="$v" ;; ch_platform) BR_CH_PLAT="$v" ;;
+      accept_lang) BR_ACCEPT="$v" ;; uad_platform) BR_UAD_PLAT="$v" ;;
       rtc_srflx) BR_RTC="$v" ;; rtc_host) BR_RTC_HOST="$v" ;; fonts) BR_FONTS="$v" ;;
       webgl) BR_WEBGL="$v" ;; canvas) BR_CANVAS="$v" ;;
     esac
@@ -256,15 +271,15 @@ compute_score() {
 
   # ── A. 出口地区与服务可用 (35) ──
   if [[ -z "$COUNTRY" ]]; then
-    sig 出口 "出口国家" 15 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
+    sig 出口 "出口国家" 14 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
   elif in_list "$COUNTRY" "$UNSUPPORTED"; then
-    sig 出口 "出口国家" 15 0 "$COUNTRY 不支持" \
+    sig 出口 "出口国家" 14 0 "$COUNTRY 不支持" \
       "出口国家 ${COUNTRY} 不在 Anthropic 服务范围，登录/订阅/API 均有封号风险" \
       "切到美国/日本/新加坡等支持地区节点，并长期固定，不要频繁换国家"
   elif in_list "$COUNTRY" "$SUPPORTED"; then
-    sig 出口 "出口国家" 15 100 "$COUNTRY ${CITY:-}"
+    sig 出口 "出口国家" 14 100 "$COUNTRY ${CITY:-}"
   else
-    sig 出口 "出口国家" 15 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
+    sig 出口 "出口国家" 14 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
   fi
 
   if [[ "$API_CODE" == "401" || "$API_CODE" == "400" ]]; then
@@ -326,13 +341,13 @@ compute_score() {
 
   # ── B. 出口质量 (12) ──
   if [[ "$PROXY" == "1" ]]; then
-    sig 质量 "IP 类型" 5 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
+    sig 质量 "IP 类型" 4 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
   elif [[ "$HOSTING" == "1" ]]; then
-    sig 质量 "IP 类型" 5 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
+    sig 质量 "IP 类型" 4 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
   elif [[ "$HOSTING" == "0" ]]; then
-    sig 质量 "IP 类型" 5 100 "住宅"
+    sig 质量 "IP 类型" 4 100 "住宅"
   else
-    sig 质量 "IP 类型" 5 70 "未知"
+    sig 质量 "IP 类型" 4 70 "未知"
   fi
 
   # Cloudflare 边缘机房国家 vs IP 库国家: 不一致说明 IP 归属被"改过"或链路绕路
@@ -479,10 +494,12 @@ compute_score() {
     # 没采集到就按中性计分(70%)，不能因为"没测"判环境有问题，也不能白送满分。
     # 命令行单跑时没有 WebView，分数会比菜单栏里低几分，属预期。
     sig 浏览器 "WebRTC 出口" 6 70 "未采集"
-    sig 浏览器 "浏览器时区" 4 70 "未采集"
+    sig 浏览器 "浏览器时区" 3 70 "未采集"
     sig 浏览器 "浏览器语言" 2 70 "未采集"
     # 1 分的项不值得因为"没测"就扣成 0/1，那看起来像 bug
     sig 浏览器 "Intl 区域设置" 1 100 "未采集"
+    sig 浏览器 "Client Hints" 2 70 "未采集"
+    sig 浏览器 "HTTP 语言首标" 1 100 "未采集"
     sig 浏览器 "渲染环境" 2 70 "未采集"
   else
     # WebRTC 走 UDP，不经过 HTTP 代理，能暴露代理没兜住的真实出口
@@ -491,15 +508,19 @@ compute_score() {
     elif [[ "$BR_RTC" == *"$PROBE_IP"* ]]; then
       sig 浏览器 "WebRTC 出口" 6 100 "$BR_RTC = 出口"
     else
-      sig 浏览器 "WebRTC 出口" 6 0 "$BR_RTC ≠ $PROBE_IP" \
-        "WebRTC 暴露了另一个出口 ${BR_RTC}，与代理出口 ${PROBE_IP} 不同——UDP 绕过了代理" \
+      # 泄漏出来的 IP 属于哪个地区，决定这次泄漏有多要命
+      local leak_n leak_cc
+      leak_n=$(echo "$BR_RTC" | awk -F, '{print NF}')
+      leak_cc=$(jget <($CURL "http://ip-api.com/json/${BR_RTC%%,*}?fields=countryCode") countryCode 2>/dev/null)
+      sig 浏览器 "WebRTC 出口" 6 0 "${leak_n} 个泄漏 · ${leak_cc:-?} ≠ $COUNTRY" \
+        "WebRTC 暴露了 ${leak_n} 个非代理出口(首个 ${BR_RTC%%,*}${leak_cc:+，归属 $leak_cc})，UDP 绕过了代理" \
         "代理开 TUN 全局(接管 UDP)，或在浏览器里禁用 WebRTC"
     fi
 
     if [[ "$BR_TZ" == "$SYS_TZ" ]]; then
-      sig 浏览器 "浏览器时区" 4 100 "$BR_TZ"
+      sig 浏览器 "浏览器时区" 3 100 "$BR_TZ$([[ "$BR_SOURCE" == browser ]] && echo " (真实浏览器)")"
     else
-      sig 浏览器 "浏览器时区" 4 25 "$BR_TZ ≠ $SYS_TZ" \
+      sig 浏览器 "浏览器时区" 3 25 "$BR_TZ ≠ $SYS_TZ" \
         "浏览器时区 ${BR_TZ} 与系统时区 ${SYS_TZ} 不一致" "重启浏览器让它重新读系统时区"
     fi
 
@@ -522,6 +543,32 @@ compute_score() {
         "浏览器 Intl 区域 ${BR_LOCALE} 与出口 ${COUNTRY} 不对应"
     fi
 
+    # Client Hints(Chromium 独有): 平台标识要和真实系统对得上，对不上说明 UA 被改过或在异常容器里
+    local ch_plat="${BR_CH_PLAT:-$BR_UAD_PLAT}" os_kind="macOS"
+    [[ "$OS_VER" == Windows* ]] && os_kind="Windows"
+    if [[ "$BR_SOURCE" != "browser" ]]; then
+      sig 浏览器 "Client Hints" 2 70 "内置引擎未采集"
+    elif [[ -z "$ch_plat" ]]; then
+      sig 浏览器 "Client Hints" 2 100 "Safari/Firefox 不提供"
+    elif [[ "$ch_plat" == *"$os_kind"* ]]; then
+      sig 浏览器 "Client Hints" 2 100 "$ch_plat"
+    else
+      sig 浏览器 "Client Hints" 2 0 "$ch_plat ≠ $os_kind" \
+        "浏览器上报的平台 ${ch_plat} 与真实系统 ${os_kind} 不符，UA 被改过或运行在异常容器中" \
+        "关掉浏览器里改 UA 的插件，用原生浏览器登录"
+    fi
+
+    # HTTP Accept-Language 首标: 服务端第一眼看到的语言偏好，比 JS 里的 navigator 更早暴露
+    if [[ "$BR_SOURCE" != "browser" || -z "$BR_ACCEPT" ]]; then
+      sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:-未采集}"
+    elif [[ -n "$COUNTRY" && "$BR_ACCEPT" == zh* ]] && ! in_list "$COUNTRY" "CN HK TW MO SG"; then
+      sig 浏览器 "HTTP 语言首标" 1 0 "$BR_ACCEPT vs $COUNTRY" \
+        "请求头 Accept-Language: ${BR_ACCEPT} 与出口 ${COUNTRY} 矛盾，服务端第一眼就能看到" \
+        "浏览器设置里把首选语言调成 English (United States)"
+    else
+      sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:0:24}"
+    fi
+
     # 渲染环境: WebGL 渲染器 + 中文字体探测。字体是"国产终端弱信号"——
     # 装着一堆中文字体本身不是问题(macOS 自带 PingFang)，只在拿不到 GPU 信息时才扣分
     local render_desc="${BR_WEBGL:0:24}"
@@ -533,7 +580,11 @@ compute_score() {
     fi
   fi
 
-  if   [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
+  # 出口落在不服务地区是硬性阻断: 国内直连的画像其实很自洽(中文+国内IP+国内时区全一致)，
+  # 不能让这些一致性得分把它抬进"基本可用"
+  if [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; then
+    GRADE="高风险"; VERDICT="$(region_note "$COUNTRY")"
+  elif [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
   elif [[ $SCORE -ge 70 ]]; then GRADE="良好"; VERDICT="基本可用，建议修复下列项"
   elif [[ $SCORE -ge 50 ]]; then GRADE="风险"; VERDICT="存在明显矛盾信号，有封号风险"
   else                           GRADE="高风险"; VERDICT="不建议在当前环境登录或使用 Claude"
