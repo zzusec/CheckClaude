@@ -31,6 +31,7 @@ let scriptPath = script("auto-timezone")
 let claudeScriptPath = script("claude-check")
 let upgradeScriptPath = script("upgrade")
 let updatePath = (baseDir as NSString).appendingPathComponent("update_status")
+let upgradeStatePath = (baseDir as NSString).appendingPathComponent("upgrade_state")
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -147,10 +148,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btn.imagePosition = .imageLeading
             btn.contentTintColor = nil                          // 文字保持系统默认色，与其它菜单栏文字一致
             let hasUpd = readStatus(updatePath)["hasupdate"] == "1"
-            btn.title = (city.isEmpty ? "" : " \(city)") + (hasUpd ? " ⬆" : "")
+            if let up = upgradeState {
+                btn.title = " 升级 \(up)"
+            } else {
+                btn.title = (city.isEmpty ? "" : " \(city)") + (hasUpd ? " ⬆" : "")
+            }
         }
 
         let menu = NSMenu()
+        if let up = upgradeState {
+            menu.addItem(colored("⬆ 正在升级：\(up)", .labelColor))
+            menu.addItem(.separator())
+        }
         let head = consistent == "1" ? "出口 IP 一致 ✅" : (s.isEmpty ? "尚无检测数据" : "出口 IP 异常 ⚠️")
         menu.addItem(disabled(head))
         menu.addItem(.separator())
@@ -432,6 +441,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     // 修复不依赖浏览器信号，直接跑脚本，别让用户干等 WebView 采集
     @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
+
+    // 升级期间每秒刷新菜单显示进度 —— 点了「立即升级」之后一片寂静，
+    // 用户不知道是在下载还是卡死了。
+    var upgradeTimer: Timer?
+    func startUpgrade() {
+        try? "启动中".write(toFile: upgradeStatePath, atomically: true, encoding: .utf8)
+        upgradeTimer?.invalidate()
+        upgradeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        runScript(["--install"], upgradeScriptPath) { [weak self] in
+            guard let self else { return }
+            self.upgradeTimer?.invalidate(); self.upgradeTimer = nil
+            let st = (try? String(contentsOfFile: upgradeStatePath, encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if st.hasPrefix("失败") { self.notify("升级失败", st) }
+            try? FileManager.default.removeItem(atPath: upgradeStatePath)
+            self.refresh()
+        }
+    }
+
+    var upgradeState: String? {
+        guard let t = try? String(contentsOfFile: upgradeStatePath, encoding: .utf8) else { return nil }
+        let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        return s.isEmpty ? nil : s
+    }
     @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
     @objc func runCheck() { runScript(["--once"]) }
@@ -462,8 +497,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             a.addButton(withTitle: "立即升级")
             a.addButton(withTitle: "稍后提醒")
             if a.runModal() == .alertFirstButtonReturn {
-                self.notify("正在升级到 v\(latest)", "下载完成后会自动重启")
-                self.runScript(["--install"], upgradeScriptPath)
+                self.startUpgrade()
             }
         }
     }
@@ -481,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.refresh()
         }
     }
-    @objc func doUpgrade() { runScript(["--install"], upgradeScriptPath) }
+    @objc func doUpgrade() { startUpgrade() }
 
     @objc func openYinso() {
         NSWorkspace.shared.open(URL(string: "https://www.yinso.com/labs/")!)
