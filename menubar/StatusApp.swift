@@ -340,7 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         canFix ? #selector(runClaudeFix) : nil))
                 }
             }
-            // 14 项信号，按 出口/质量/画像/DNS 分组展示: 分组~标签~权重~得分~值
+            // 26 项信号，按六组展示: 分组~标签~权重~得分~值
             var group = ""
             for row in (c["signals"] ?? "").split(separator: ";") {
                 let f = row.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
