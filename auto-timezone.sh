@@ -20,9 +20,17 @@ set -uo pipefail
 
 # 数据目录: 默认放用户的 Application Support，可用环境变量 AUTO_TZ_DIR 覆盖。
 # 这样 App 自包含、可打包分发，不依赖任何硬编码用户路径。
-DATA_DIR="${AUTO_TZ_DIR:-$HOME/Library/Application Support/AutoTimezone}"
+DATA_DIR="${AUTO_TZ_DIR:-$HOME/Library/Application Support/CheckClaude}"
+# v2.0 从 AutoTimezone 改名 CheckClaude，把旧数据目录搬过来 ——
+# 出口稳定性要读 24h 内的历史日志，不搬会丢。
+OLD_DIR="$HOME/Library/Application Support/AutoTimezone"
+[[ ! -d "$DATA_DIR" && -d "$OLD_DIR" ]] && mv "$OLD_DIR" "$DATA_DIR" 2>/dev/null
 mkdir -p "$DATA_DIR" 2>/dev/null || true
 LOG="$DATA_DIR/auto-timezone.log"
+# 日志轮转: 超过 5MB 就只留最后 2000 行。它会被"出口稳定性"逐行扫，不能让它无限长。
+if [[ -f "$LOG" ]] && [[ $(stat -f %z "$LOG" 2>/dev/null || echo 0) -gt 5242880 ]]; then
+  tail -2000 "$LOG" >"$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
+fi
 STATE="$DATA_DIR/last_state"   # 记录上次的 "出口IP|是否一致"，用于变化告警
 STATUS="$DATA_DIR/status"      # 给菜单栏 App 读取的快照(key=value)
 
