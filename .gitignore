@@ -10,3 +10,8 @@ last_state
 menubar_debug.log
 
 .DS_Store
+
+# Windows 构建产物
+windows/*.exe
+windows/*.zip
+windows/AssemblyInfo.cs
