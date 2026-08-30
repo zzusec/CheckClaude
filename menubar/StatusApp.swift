@@ -146,7 +146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btn.image = img
             btn.imagePosition = .imageLeading
             btn.contentTintColor = nil                          // 文字保持系统默认色，与其它菜单栏文字一致
-            btn.title = city.isEmpty ? "" : " \(city)"
+            let hasUpd = readStatus(updatePath)["hasupdate"] == "1"
+            btn.title = (city.isEmpty ? "" : " \(city)") + (hasUpd ? " ⬆" : "")
         }
 
         let menu = NSMenu()
@@ -435,12 +436,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func runCheck() { runScript(["--once"]) }
 
-    // 同一个新版本只弹一次，别每 30 秒重画菜单就骚扰一遍
+    // 有新版就持续提醒，但每天最多一次 —— 只弹一次的话，错过就再也不提了；
+    // 每 30 秒重画菜单都弹又会烦死人。
     func notifyNewVersion(_ latest: String) {
-        let key = "notifiedVersion"
-        guard UserDefaults.standard.string(forKey: key) != latest else { return }
-        UserDefaults.standard.set(latest, forKey: key)
-        notify("CheckClaude 有新版本 v\(latest)", "点菜单栏图标 →「升级到 v\(latest)」一键更新")
+        let d = UserDefaults.standard
+        let key = "notifiedVersion", tsKey = "notifiedAt"
+        let sameVersion = d.string(forKey: key) == latest
+        let last = d.double(forKey: tsKey)
+        let elapsed = Date().timeIntervalSince1970 - last
+        guard !sameVersion || elapsed > 86400 else { return }
+        d.set(latest, forKey: key)
+        d.set(Date().timeIntervalSince1970, forKey: tsKey)
+        notify("CheckClaude 有新版本 v\(latest)", "点菜单栏图标 →「⬆ 升级到 v\(latest)」一键更新")
     }
 
     // 点了必须有回音 —— 之前静默执行，已是最新时看着就像"点了没反应"
