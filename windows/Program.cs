@@ -988,6 +988,9 @@ namespace CheckClaude
 
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(Item("打开日志", (s, e) => { try { Process.Start("notepad.exe", Paths.Log); } catch { } }));
+            var auto = new ToolStripMenuItem("开机自启") { Checked = AutoStart.Enabled, CheckOnClick = true };
+            auto.Click += (s, e) => { AutoStart.Toggle(); BuildMenu(); };
+            m.Items.Add(auto);
             m.Items.Add(new ToolStripSeparator());
             if (Updater.HasUpdate)
             {
@@ -1032,19 +1035,108 @@ namespace CheckClaude
         }
     }
 
+    // 开机自启: 注册表 Run 项，不需要管理员
+    static class AutoStart
+    {
+        const string Key = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string Name = "CheckClaude";
+        public static bool Enabled
+        {
+            get
+            {
+                try { using (var k = Registry.CurrentUser.OpenSubKey(Key)) return k != null && k.GetValue(Name) != null; }
+                catch { return false; }
+            }
+        }
+        public static void Toggle()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(Key, true))
+                {
+                    if (k == null) return;
+                    if (Enabled) k.DeleteValue(Name, false);
+                    else k.SetValue(Name, "\"" + Application.ExecutablePath + "\"");
+                }
+            }
+            catch { }
+        }
+    }
+
     static class Program
     {
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool AttachConsole(int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool AllocConsole();
+
+        // 控制台报告模式: CheckClaude.exe --check
+        // winexe 没有控制台，先附到父进程的，附不上就自己开一个
+        static int RunConsole()
+        {
+            if (!AttachConsole(-1)) AllocConsole();
+            Console.OutputEncoding = Encoding.UTF8;
+            var f = Collector.Collect();
+            var r = Report.Build(f);
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine("  CheckClaude 运行环境体检");
+            sb.AppendLine("  " + new string('-', 54));
+            var bar = new string('#', r.Score / 5) + new string('.', 20 - r.Score / 5);
+            sb.AppendLine("  得分  " + bar + "  " + r.Score + "/100  【" + r.Grade + "】");
+            sb.AppendLine("  结论  " + r.Verdict);
+            sb.AppendLine();
+            string grp = null;
+            foreach (var s2 in r.Signals)
+            {
+                if (s2.Group != grp) { grp = s2.Group; sb.AppendLine("  -- " + grp + " --"); }
+                sb.AppendLine(string.Format("  {0}  {1,-18} {2,-26} {3,2}/{4}",
+                    s2.Ok ? "OK" : "!!", s2.Label, s2.Value, s2.Points, s2.Weight));
+            }
+            sb.AppendLine();
+            sb.AppendLine("  出口 " + (f.ProbeIp ?? "?") + " · " + (f.CountryName ?? "?") + " " + (f.City ?? "") + " · " + (f.Isp ?? "?"));
+            sb.AppendLine("  系统 " + f.SysTimezone + " · " + f.Locale + " · " + f.ProxyMode + " · " + f.VmHost);
+            sb.AppendLine("  DNS  " + f.DnsScope + " · claude.ai -> " + f.DnsVerdict);
+            sb.AppendLine("  CLI  " + (f.ClaudeVer ?? "未检测到") + " · 接口 " + (string.IsNullOrEmpty(f.ClaudeBase) ? "官方" : f.ClaudeBase));
+            if (r.Gains.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("  还能提 " + (100 - r.Score) + " 分");
+                foreach (var g in r.Gains)
+                    sb.AppendLine(string.Format("    +{0,-3} {1,-18} {2}", g.Weight - g.Points, g.Label, g.Hint ?? ""));
+            }
+            if (r.Issues.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("  发现的问题");
+                foreach (var i in r.Issues) sb.AppendLine("    * " + i);
+            }
+            sb.AppendLine();
+            Console.WriteLine(sb.ToString());
+            Paths.Write(string.Format("体检(命令行): {0}/100 {1} country={2} api={3}",
+                r.Score, r.Grade, f.Country ?? "?", f.ApiCode));
+            return r.Score >= 70 ? 0 : 1;
+        }
+
         [STAThread]
-        static void Main()
+        static int Main(string[] args)
+        {
+            if (args.Length > 0 && (args[0] == "--check" || args[0] == "-c")) return RunConsole();
+            if (args.Length > 0 && args[0] == "--version") { if (!AttachConsole(-1)) AllocConsole(); Console.WriteLine(Application.ProductVersion); return 0; }
+            return RunTray();
+        }
+
+        static int RunTray()
         {
             bool created;
             using (new Mutex(true, "CheckClaude.SingleInstance", out created))
             {
-                if (!created) return;                 // 已经在跑就别开第二个托盘图标
+                if (!created) return 0;               // 已经在跑就别开第二个托盘图标
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new TrayApp());
             }
+            return 0;
         }
     }
 }
