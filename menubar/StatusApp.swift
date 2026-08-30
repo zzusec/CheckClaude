@@ -137,6 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("更新时间: \(s["time"] ?? "—")"))
         menu.addItem(.separator())
         menu.addItem(claudeMenuItem())
+        // 修复入口放在主菜单一级，不藏进子菜单里
+        let c = readStatus(claudeStatusPath)
+        if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
+            let fix = action("⚡ 一键修复：\(list)", #selector(runClaudeFix))
+            fix.attributedTitle = NSAttributedString(
+                string: "⚡ 一键修复：\(list)",
+                attributes: [.foregroundColor: NSColor.systemOrange])
+            menu.addItem(fix)
+        }
         menu.addItem(.separator())
         menu.addItem(action("立即检测", #selector(runCheck)))
         // 检测间隔子菜单
@@ -254,8 +263,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func runClaudeCheck() { fullCheck() }
-    @objc func runClaudeFix() { fullCheck(["--fix"]) }
-    @objc func runClaudeFixLocale() { fullCheck(["--fix-locale"]) }
+    // 修复不依赖浏览器信号，直接跑脚本，别让用户干等 WebView 采集
+    @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
+    @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
     @objc func runCheck() { runScript(["--once"]) }
 
