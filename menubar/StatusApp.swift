@@ -184,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(action("检查更新", #selector(checkUpdate)))
         }
         menu.addItem(.separator())
-        menu.addItem(action("官方网站：https://www.yinso.com/labs/", #selector(openYinso)))
+        menu.addItem(action("官方网站", #selector(openYinso)))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
 
