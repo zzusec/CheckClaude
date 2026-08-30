@@ -1030,6 +1030,7 @@ namespace CheckClaude
             else
             {
                 var f = report.F;
+                var r = report;
                 bool unfit = score < 70;
                 var head = new ToolStripMenuItem("Claude 环境 " + score + " 分 · " + report.Grade);
                 if (unfit) head.ForeColor = Color.FromArgb(200, 30, 30);
@@ -1067,6 +1068,23 @@ namespace CheckClaude
                 else
                     m.Items.Add(Item(score >= 100 ? "⚡ 一键修复（已满分，无需修复）"
                                                   : "⚡ 一键修复（剩余项需手动处理）"));
+
+                // 手动处理步骤常驻菜单: 修复弹窗是一次性的，关掉就找不回来了
+                var autoFixable = new[] { "系统时区匹配出口", "DNS 出口", "代理形态" };
+                var manual = r.Gains.Where(g => !autoFixable.Contains(g.Label)).ToList();
+                if (manual.Count > 0)
+                {
+                    var mm = new ToolStripMenuItem("📋 手动处理步骤（" + manual.Count + " 项）");
+                    foreach (var g in manual)
+                    {
+                        mm.DropDownItems.Add(Item(g.Label + "   +" + (g.Weight - g.Points) + " 分"));
+                        foreach (var part in (g.Hint ?? "").Split('；'))
+                            if (part.Trim().Length > 0) mm.DropDownItems.Add(Item("      " + part.Trim()));
+                        mm.DropDownItems.Add(new ToolStripSeparator());
+                    }
+                    mm.DropDownItems.Add(Item("重新体检", (s2, e2) => RunCheck(true)));
+                    m.Items.Add(mm);
+                }
 
                 m.Items.Add(new ToolStripSeparator());
                 m.Items.Add(Item("出口 IP: " + (f.ProbeIp ?? "?") + (f.Consistent ? "（三路一致）" : "（三路不一致）")));
@@ -1114,8 +1132,25 @@ namespace CheckClaude
                 if (r.FixableTz != null) any |= Fixer.FixTimezone(r.FixableTz);
                 if (r.FixablePac) any |= Fixer.DisablePac();
                 if (r.FixableDns) any |= Fixer.FixDns(r.F.ActiveNic);
-                Sync(() => icon.ShowBalloonTip(5000, "CheckClaude",
-                    any ? "修复完成，正在重新体检" : "没有修复成功的项（可能取消了授权）", ToolTipIcon.Info));
+                var autoFix = new[] { "系统时区匹配出口", "DNS 出口", "代理形态" };
+                var todo = r.Gains.Where(g => !autoFix.Contains(g.Label)).ToList();
+                Sync(() =>
+                {
+                    icon.ShowBalloonTip(5000, "CheckClaude",
+                        any ? "修复完成，正在重新体检" : "没有修复成功的项（可能取消了授权）", ToolTipIcon.Info);
+                    if (todo.Count > 0)
+                    {
+                        var sb = new StringBuilder(any
+                            ? "已自动修复的部分完成。还有 " + todo.Count + " 项需要你手动处理：\r\n\r\n"
+                            : "有 " + todo.Count + " 项需要你手动处理（这些无法自动完成）：\r\n\r\n");
+                        int i = 1;
+                        foreach (var g in todo)
+                            sb.AppendLine(i++ + ". " + g.Label + "（+" + (g.Weight - g.Points) + " 分）\r\n   " + (g.Hint ?? ""));
+                        sb.AppendLine("\r\n（这些步骤随时可以在托盘菜单 →「📋 手动处理步骤」里翻到，不用记）");
+                        MessageBox.Show(sb.ToString(), "CheckClaude 修复指引",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                });
                 RunCheck(false);
             });
         }
