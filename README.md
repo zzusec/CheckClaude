@@ -18,6 +18,19 @@ Claude 环境 🟢 98 分 · 优秀
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 
+## 下载
+
+| 平台 | 下载 | 要求 |
+|---|---|---|
+| macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次右键→打开 |
+| Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
+
+两端同一套评分模型（20 项加权信号，合计 100）。Windows 版的浏览器 4 项按中性 70% 计分——
+单文件 exe 带不了 WebView2 依赖，和 macOS 命令行单跑是同一口径，不假装测过。
+
+Windows 版是 .NET Framework 4.8（系统预装）+ `csc.exe` 编译的单个 46KB exe，托盘常驻。
+修改系统时区和 DNS 需要管理员权限，点「一键修复」时会弹一次 UAC。
+
 ## 快速开始
 
 ```bash
@@ -35,6 +48,9 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：20 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
 | `test-claude-check.sh` | 体检评分逻辑自测（不联网） |
+| `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级 |
+| `windows/Program.cs` | Windows 版全部实现（托盘 + 检测 + 修复 + 升级），单文件 C# |
+| `windows/build-remote.sh` | 在 Mac 上一条命令远程编译出 Windows 产物 |
 | `com.hx10.checkclaude-daemon.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
 | `menubar/CheckClaude.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
 | `menubar/*.plist` | 菜单栏 App 的开机自启 LaunchAgent |
