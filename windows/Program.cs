@@ -1091,7 +1091,7 @@ namespace CheckClaude
             scanTimer.Tick += (s, e) => RunExitProbe();
             scanTimer.Start();
 
-            updTimer = new System.Windows.Forms.Timer { Interval = 6 * 3600 * 1000 };    // 每 6 小时查一次新版本
+            updTimer = new System.Windows.Forms.Timer { Interval = 2 * 3600 * 1000 };    // 每 2 小时查一次新版本
             updTimer.Tick += (s, e) => Task.Run(() => { Updater.Check(); Sync(BuildMenu); });
             updTimer.Start();
 
@@ -1389,7 +1389,22 @@ namespace CheckClaude
             else
             {
                 m.Items.Add(Item("版本 v" + Application.ProductVersion + "（已是最新）"));
-                m.Items.Add(Item("检查更新", (s, e) => Task.Run(() => { Updater.Check(); Sync(BuildMenu); })));
+                // 点了必须有回音 —— 之前静默执行，已是最新时看着就像"点了没反应"
+                m.Items.Add(Item("检查更新", (s, e) => Task.Run(() =>
+                {
+                    Sync(() => icon.ShowBalloonTip(3000, "CheckClaude", "正在检查更新…", ToolTipIcon.Info));
+                    Updater.Check();
+                    Sync(() =>
+                    {
+                        BuildMenu();
+                        if (Updater.HasUpdate)
+                            icon.ShowBalloonTip(8000, "发现新版本 v" + Updater.Latest,
+                                "右键托盘 →「⬆ 升级到 v" + Updater.Latest + "」一键更新", ToolTipIcon.Info);
+                        else
+                            icon.ShowBalloonTip(5000, "已经是最新版本",
+                                "v" + Application.ProductVersion, ToolTipIcon.Info);
+                    });
+                })));
             }
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add(Item("官方网站",
