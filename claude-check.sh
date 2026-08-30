@@ -361,28 +361,109 @@ compute_score() {
 }
 
 # ── 自动修复 ────────────────────────────────────────────────────
+notify() { osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1; }
+
+# 当前活跃的网络服务名(Wi-Fi / Ethernet / ...)，networksetup 要用它定位
+active_service() {
+  local dev svc
+  dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  [[ -z "$dev" ]] && return 1
+  # "Hardware Port: Wi-Fi" / "Device: en0" 成对出现，找到 dev 对应的那个 port
+  networksetup -listallhardwareports 2>/dev/null | awk -v d="$dev" '
+    /^Hardware Port:/{p=substr($0,16)} /^Device:/{if($2==d){print p; exit}}'
+}
+
+# 生成并打开 DoH 描述文件。在国内直接把 DNS 改成 1.1.1.1 会被投毒污染，
+# 明文 DNS 换谁都一样，只有加密 DNS(DoH) 才真正解决泄漏，所以修复走 mobileconfig。
+fix_dns_doh() {
+  local f="$DATA_DIR/Cloudflare-DoH.mobileconfig"
+  local u1 u2; u1=$(uuidgen); u2=$(uuidgen)
+  cat >"$f" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>PayloadContent</key><array><dict>
+    <key>PayloadType</key><string>com.apple.dnsSettings.managed</string>
+    <key>PayloadIdentifier</key><string>com.hx10.auto-timezone.doh</string>
+    <key>PayloadUUID</key><string>$u1</string>
+    <key>PayloadVersion</key><integer>1</integer>
+    <key>PayloadDisplayName</key><string>加密 DNS (Cloudflare DoH)</string>
+    <key>DNSSettings</key><dict>
+      <key>DNSProtocol</key><string>HTTPS</string>
+      <key>ServerURL</key><string>https://cloudflare-dns.com/dns-query</string>
+    </dict>
+  </dict></array>
+  <key>PayloadDisplayName</key><string>AutoTimezone 加密 DNS</string>
+  <key>PayloadIdentifier</key><string>com.hx10.auto-timezone.doh.profile</string>
+  <key>PayloadType</key><string>Configuration</string>
+  <key>PayloadUUID</key><string>$u2</string>
+  <key>PayloadVersion</key><integer>1</integer>
+</dict></plist>
+PLIST
+  open "$f" 2>/dev/null
+  open "x-apple.systempreferences:com.apple.preference.security?Profiles" 2>/dev/null
+  echo "  📄 已生成 DoH 描述文件并打开系统设置，点「安装」即可(撤销=在描述文件里删除)"
+  echo "     $f"
+}
+
 apply_fixes() {
-  local done_any=0
+  local done_any=0 svc
+  svc=$(active_service)
+
+  # 1. 时区(无副作用，靠已配的免密 sudo)
   if [[ -n "${FIXABLE_TZ:-}" && -f "$TZ_SCRIPT" ]]; then
     echo "→ 修复时区: $SYS_TZ -> $FIXABLE_TZ"
     AUTO_TZ_DIR="$DATA_DIR" bash "$TZ_SCRIPT" >/dev/null 2>&1
     SYS_TZ=$(readlink /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')
     TZ_OFFSET=$(date +%z); TZ_ABBR=$(date +%Z)
     if [[ "$SYS_TZ" == "$FIXABLE_TZ" ]]; then
-      echo "  ✅ 已改为 $SYS_TZ"; log "claude-check: 已修复时区 -> $SYS_TZ"; done_any=1
+      echo "  ✅ 已改为 $SYS_TZ"; log "fix: 时区 -> $SYS_TZ"; done_any=1
     else
-      echo "  ⚠️  改时区失败，需先运行一次: sudo bash enable-auto-timezone.sh"
+      echo "  ⚠️  失败，需先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
     fi
   fi
+
+  # 2. 关掉 PAC 分流(分流会让账号画像在多地区跳变)
+  if [[ "${PAC_ON:-0}" == "1" && -n "$svc" ]]; then
+    echo "→ 关闭 PAC 自动分流 ($svc)"
+    if sudo -n /usr/sbin/networksetup -setautoproxystate "$svc" off >/dev/null 2>&1; then
+      echo "  ✅ 已关闭(撤销: networksetup -setautoproxystate \"$svc\" on)"
+      log "fix: 关闭 PAC ($svc)"; PAC_ON=0; PROXY_MODE="${PROXY_MODE% + PAC 分流}"; done_any=1
+    else
+      echo "  ⚠️  需要授权，先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
+    fi
+  fi
+
+  # 3. DNS 泄漏 -> 上加密 DNS
+  if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then
+    echo "→ 修复 DNS 泄漏 (当前 $DNS_SCOPE)"
+    fix_dns_doh; done_any=1
+  fi
+
+  # 4. 系统区域(会影响日期格式显示，需显式 --fix-locale)
   if [[ $FIX_LOCALE -eq 1 && -n "${FIXABLE_LOCALE:-}" ]]; then
     local lang="${SYS_LOCALE%%_*}"
     echo "→ 修复系统区域: $SYS_LOCALE -> ${lang}_${FIXABLE_LOCALE}"
     defaults write -g AppleLocale "${lang}_${FIXABLE_LOCALE}" 2>/dev/null \
       && { echo "  ✅ 已改(重开 App 生效，撤销: defaults write -g AppleLocale $SYS_LOCALE)"; done_any=1; }
     SYS_LOCALE="${lang}_${FIXABLE_LOCALE}"; LOCALE_CC="$FIXABLE_LOCALE"
+  elif [[ -n "${FIXABLE_LOCALE:-}" ]]; then
+    echo "→ 系统区域与出口不一致，改它会影响日期格式显示，需显式确认: ./claude-check.sh --fix-locale"
   fi
-  [[ $done_any -eq 0 ]] && echo "没有可自动修复的项(其余需手动调整代理/DNS/节点)"
+
+  if [[ $done_any -eq 0 ]]; then
+    echo "没有可自动修复的项(剩下的是换节点/换住宅 IP，只能手动)"
+  fi
   return 0
+}
+
+# 有哪些项能自动修 —— 菜单栏据此决定是否亮"一键修复"
+fixable_list() {
+  local l=""
+  [[ -n "${FIXABLE_TZ:-}" ]] && l+="${l:+、}时区"
+  [[ "${PAC_ON:-0}" == "1" ]] && l+="${l:+、}关PAC分流"
+  [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]] && l+="${l:+、}DNS加密"
+  echo "$l"
 }
 
 write_cstatus() {
@@ -399,7 +480,9 @@ write_cstatus() {
     echo "os=${OS_VER}"; echo "proxymode=${PROXY_MODE}"
     echo "dns=${DNS_SCOPE}"; echo "dnsresult=${DNS_VERDICT}"
     echo "claudever=${CLAUDE_VER:-未安装}"; echo "base=${CLAUDE_BASE:-官方}"
-    echo "fixable=$( [[ -n "${FIXABLE_TZ:-}" ]] && echo 1 || echo 0 )"
+    echo "fixable=$( [[ -n "$(fixable_list)" ]] && echo 1 || echo 0 )"
+    echo "fixlist=$(fixable_list)"
+    echo "needsudo=${NEED_SUDO:-0}"
     echo "signals=$(IFS=';'; echo "${SIGNALS[*]}")"
     echo "issues=$ISSUES"; echo "fixes=$FIXES"
   } >"$CSTATUS" 2>/dev/null || true
@@ -446,8 +529,15 @@ main() {
   parse_claude
   compute_score
   if [[ $DO_FIX -eq 1 ]]; then
+    local before=$SCORE
     apply_fixes
+    parse_dns              # DNS 改动后重新采集
     compute_score          # 修完重新打分
+    if [[ "${NEED_SUDO:-0}" == "1" ]]; then
+      notify "修复需要授权" "先运行一次 sudo bash enable-auto-timezone.sh"
+    elif [[ $SCORE -gt $before ]]; then
+      notify "Claude 环境已修复" "${before} → ${SCORE} 分"
+    fi
   fi
   write_cstatus
   [[ "$MODE" != "quiet" ]] && print_report
