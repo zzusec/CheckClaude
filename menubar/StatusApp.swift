@@ -141,11 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = readStatus(claudeStatusPath)
         menu.addItem(action("重新体检", #selector(runClaudeCheck)))
         if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
-            let fix = action("⚡ 一键修复：\(list)", #selector(runClaudeFix))
-            fix.attributedTitle = NSAttributedString(
-                string: "⚡ 一键修复：\(list)",
-                attributes: [.foregroundColor: NSColor.systemOrange])
-            menu.addItem(fix)
+            menu.addItem(action("⚡ 一键修复：\(list)", #selector(runClaudeFix)))
         }
         menu.addItem(.separator())
         menu.addItem(action("立即检测", #selector(runCheck)))
@@ -234,9 +230,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
             sub.addItem(.separator())
             if gains.isEmpty {
-                sub.addItem(colored("🎉 已满分，没有可提升项", .systemGreen))
+                sub.addItem(colored("🎉 已满分，没有可提升项", .labelColor))
             } else {
-                sub.addItem(colored("还能提 \(100 - score) 分", .systemOrange))
+                sub.addItem(colored("还能提 \(100 - score) 分", .labelColor))
                 let fixableNames = ["系统时区匹配出口", "DNS 出口", "代理形态"]
                 for g in gains {
                     let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
@@ -244,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // 能一键修的项，点它就直接修
                     let canFix = c["fixable"] == "1" && fixableNames.contains(f[0])
                     let mark = canFix ? "⚡" : "＋\(f[1])"
-                    sub.addItem(colored("   \(mark)  \(f[0])：\(f[2])", .systemOrange,
+                    sub.addItem(colored("   \(mark)  \(f[0])：\(f[2])", .labelColor,
                                         canFix ? #selector(runClaudeFix) : nil))
                 }
             }
