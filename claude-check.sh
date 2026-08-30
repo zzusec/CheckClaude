@@ -814,9 +814,10 @@ show_manual_guide() {
   echo "  下面 ${n} 项需要你自己操作:"
   echo "$body" | sed 's/^/  /'
 
+  local tail_note="${nl}（这些步骤随时可以在菜单栏 →「📋 手动处理步骤」里翻到，不用记）"
   local head="已自动修复的部分完成。还有 ${n} 项需要你手动处理："
   [[ $auto_done -eq 0 ]] && head="有 ${n} 项需要你手动处理（这些无法自动完成）："
-  osascript -e "display dialog \"${head}${nl}${nl}${body}\" buttons {\"知道了\"} default button 1 with title \"CheckClaude 修复指引\" with icon note" >/dev/null 2>&1 &
+  osascript -e "display dialog \"${head}${nl}${nl}${body}${tail_note}\" buttons {\"知道了\"} default button 1 with title \"CheckClaude 修复指引\" with icon note" >/dev/null 2>&1 &
 }
 
 # 有哪些项能自动修 —— 菜单栏据此决定是否亮"一键修复"
