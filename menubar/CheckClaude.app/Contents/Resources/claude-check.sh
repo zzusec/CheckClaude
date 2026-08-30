@@ -584,6 +584,11 @@ compute_score() {
   # 不能让这些一致性得分把它抬进"基本可用"
   if [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; then
     GRADE="高风险"; VERDICT="$(region_note "$COUNTRY")"
+  # 三路出口不一致 = 分流模式，账号画像在多个地区间跳变，是风控最敏感的信号之一。
+  # 只按扣分算(才 5 分)会让 80 多分的环境显示"良好"，与红色图标自相矛盾 —— 硬降级。
+  elif [[ "$CONSISTENT" != "1" ]]; then
+    GRADE="风险"
+    VERDICT="出口 IP 分流(国内 ${CN_IP} / 国外 ${INTL_IP})，账号画像会在多地区间跳变，不建议使用"
   elif [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
   elif [[ $SCORE -ge 70 ]]; then GRADE="良好"; VERDICT="基本可用，建议修复下列项"
   elif [[ $SCORE -ge 50 ]]; then GRADE="风险"; VERDICT="存在明显矛盾信号，有封号风险"
