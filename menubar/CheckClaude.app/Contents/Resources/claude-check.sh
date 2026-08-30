@@ -616,6 +616,12 @@ gain_hint() {
     "浏览器时区")        echo "重启浏览器，让它重新读系统时区" ;;
     "浏览器语言")        echo "把浏览器首选语言调成 en-US" ;;
     "渲染环境")          echo "从菜单栏 App 体检(命令行单跑拿不到浏览器信号)" ;;
+    "anthropic.com 可达") echo "开全局代理后重试；持续 403 说明该节点被 Anthropic 拦" ;;
+    "IPv6 出口")         echo "代理设置里开启 IPv6 接管；或 系统设置 → 网络 → 详细信息 → TCP/IP → 配置 IPv6 选「关闭」" ;;
+    "语言变体一致")      echo "仅用 Claude Code 可忽略；常用网页端就在 系统设置 → 通用 → 语言与地区 把首选语言拖成 English" ;;
+    "Intl 区域设置")     echo "浏览器设置里把语言/区域调成与出口地区一致（Chrome: 设置 → 语言）" ;;
+    "Client Hints")      echo "关掉浏览器里改 UA 的插件，用原生浏览器打开 claude.ai" ;;
+    "HTTP 语言首标")     echo "浏览器设置 → 语言，把 English (United States) 拖到第一位" ;;
     *)                   echo "重新体检" ;;
   esac
 }
@@ -782,9 +788,35 @@ apply_fixes() {
   fi
 
   if [[ $done_any -eq 0 ]]; then
-    echo "没有可自动修复的项(剩下的是换节点/换住宅 IP，只能手动)"
+    echo "没有可自动修复的项"
   fi
+  show_manual_guide "$done_any"
   return 0
+}
+
+# 需要用户自己动手的项(换节点、改浏览器语言、关 IPv6 …)，给出可照做的步骤
+show_manual_guide() {
+  local auto_done="$1" nl=$'\n' body="" l d h n=0
+  build_gains
+  while IFS='~' read -r l d h; do
+    [[ -z "$l" ]] && continue
+    # 这三项刚才已经自动处理过，不再重复要求用户做
+    case "$l" in 系统时区匹配出口|"DNS 出口"|代理形态) continue ;; esac
+    n=$((n+1))
+    body+="${n}. ${l}（+${d} 分）${nl}   ${h}${nl}"
+  done <<<"$(echo "$GAINS" | tr '|' '\n')"
+
+  if [[ $n -eq 0 ]]; then
+    [[ $auto_done -eq 1 ]] && notify "修复完成" "没有需要你手动处理的项"
+    return 0
+  fi
+  echo ""
+  echo "  下面 ${n} 项需要你自己操作:"
+  echo "$body" | sed 's/^/  /'
+
+  local head="已自动修复的部分完成。还有 ${n} 项需要你手动处理："
+  [[ $auto_done -eq 0 ]] && head="有 ${n} 项需要你手动处理（这些无法自动完成）："
+  osascript -e "display dialog \"${head}${nl}${nl}${body}\" buttons {\"知道了\"} default button 1 with title \"CheckClaude 修复指引\" with icon note" >/dev/null 2>&1 &
 }
 
 # 有哪些项能自动修 —— 菜单栏据此决定是否亮"一键修复"
