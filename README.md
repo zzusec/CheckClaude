@@ -42,7 +42,7 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 - 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
 
-## Claude 运行环境体检（v1.5）
+## Claude 运行环境体检（v1.6）
 
 判断当前环境是否适合运行 Claude / Claude Code：打分 + 问题清单 + 修复建议 + 自动修复。
 评分模型参考 [check-cc](https://github.com/yacuo/check-cc) 的多信号加权思路，改为 macOS 本地实现，
@@ -112,7 +112,7 @@ DNS 修复先拿 `1.1.1.1 / 8.8.8.8 / 9.9.9.9` 各解析一次 `claude.ai`，确
 sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSWD
 ```
 
-菜单栏「Claude 环境 🟢 92 分」子菜单里可查看全部明细、问题与建议，并直接点「一键修复」。
+菜单栏主菜单里直接有「重新体检」和「⚡ 一键修复：xxx」两个入口；「Claude 环境 🟢 96 分」子菜单展开是 20 项明细、问题与建议。
 体检**只在出口 IP 变化或手动点击时触发**，不会每分钟去敲 Anthropic 接口。
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
