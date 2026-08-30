@@ -20,7 +20,7 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 | 文件 | 作用 |
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
-| `claude-check.sh` | Claude 运行环境体检：打分 + 问题清单 + 修复建议 + 自动修复 |
+| `claude-check.sh` | Claude 运行环境体检：20 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
 | `test-claude-check.sh` | 体检评分逻辑自测（不联网） |
 | `com.hx10.auto-timezone.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
 | `menubar/AutoTimezone.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
@@ -42,7 +42,7 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 - 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
 
-## Claude 运行环境体检（v1.3）
+## Claude 运行环境体检（v1.4）
 
 判断当前环境是否适合运行 Claude / Claude Code：打分 + 问题清单 + 修复建议 + 自动修复。
 评分模型参考 [check-cc](https://github.com/yacuo/check-cc) 的多信号加权思路，改为 macOS 本地实现，
@@ -54,32 +54,58 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 ~/auto-timezone/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
 ```
 
-共 **14 项加权信号**，合计 100 分：
+共 **20 项加权信号**，合计 100 分，分 6 组：
 
 | 组 | 信号 | 权重 | 说明 |
 |---|---|---|---|
-| 出口 | 出口国家 | 22 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
-| 出口 | Anthropic API 可达 | 13 | 返回 401 为正常（未带密钥）；403 = 出口被地区拦截 |
-| 出口 | claude.ai 可达 | 7 | 测 `robots.txt`——主页对裸 curl 一律 403，那是 bot 挑战不是地区拦截 |
+| 出口 | 出口国家 | 18 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
+| 出口 | Anthropic API 可达 | 10 | 返回 401 为正常（未带密钥）；403 = 出口被地区拦截 |
+| 出口 | claude.ai 可达 | 4 | 测 `robots.txt`——主页对裸 curl 一律 403，那是 bot 挑战不是地区拦截 |
 | 出口 | 多源情报一致 | 3 | 两家 IP 情报库对该出口判定是否冲突 |
-| 质量 | IP 类型 | 8 | 住宅 / 机房 IDC / 公开代理，风控强度不同 |
-| 质量 | 边缘机房匹配 | 4 | Cloudflare 实际落地机房与 IP 库归属是否一致（比 IP 库更难伪造） |
+| 质量 | IP 类型 | 6 | 住宅 / 机房 IDC / 公开代理 |
+| 质量 | 边缘机房匹配 | 3 | Cloudflare 实际落地机房与 IP 库归属是否一致（比 IP 库更难伪造） |
 | 质量 | 出口链路单一 | 3 | CF 看到的来源 IP ≠ 检测到的出口 = 链路上还有一层代理 |
-| 画像 | 三路出口一致 | 8 | 分流 / PAC 会让账号画像在多地区间跳变 |
-| 画像 | 系统时区匹配出口 | 7 | 典型矛盾信号，**可一键修复** |
+| 画像 | 三路出口一致 | 6 | 分流 / PAC 会让账号画像在多地区间跳变 |
+| 画像 | 系统时区匹配出口 | 5 | 典型矛盾信号，**可一键修复** |
 | 画像 | 时区偏移自洽 | 2 | UTC 偏移与时区名冲突 = 被 `TZ` 环境变量覆盖过 |
-| 画像 | 系统区域匹配出口 | 5 | 系统区域与出口地区矛盾（网页端登录时暴露） |
-| 画像 | 代理形态 | 3 | TUN 全局 / 系统代理 / **PAC 分流**（分流扣分最重） |
-| DNS | claude.ai 解析 | 9 | 正常（Cloudflare / Anthropic 自有段）/ fake-ip 接管 / 被污染 |
-| DNS | DNS 出口 | 6 | 用国内公共 DNS = 查询泄漏到国内，与国外出口矛盾 |
+| 画像 | 系统区域匹配出口 | 5 | 系统区域与出口地区矛盾 |
+| DNS | claude.ai 解析 | 6 | 正常（Cloudflare / Anthropic 自有段）/ fake-ip 接管 / 被污染 |
+| DNS | DNS 出口 | 4 | 用国内公共 DNS = 查询泄漏到国内，**可一键修复** |
+| 稳定 | 代理形态 | 3 | TUN 全局 / 系统代理 / **PAC 分流**，**可一键修复** |
+| 稳定 | 出口稳定性 | 4 | 24h 内出口跳变次数（设备连续性，读本地日志——网页端做不到） |
+| 稳定 | 运行容器 | 3 | 物理机 / 虚拟机（设备指纹异常是风控关注点） |
+| 浏览器 | WebRTC 出口 | 6 | **UDP 不走 HTTP 代理**，能暴露代理没兜住的真实出口 |
+| 浏览器 | 浏览器时区 | 4 | Intl 时区与系统时区是否一致 |
+| 浏览器 | 浏览器语言 | 3 | `navigator.languages` 与出口地区是否矛盾 |
+| 浏览器 | 渲染环境 | 2 | WebGL 渲染器 / Canvas 指纹 / 中文字体探测 |
 
 得分 ≥85 优秀 🟢，70–84 良好 🟡，50–69 风险 🟠，<50 高风险 🔴。
-操作系统、ASN、边缘机房、Claude CLI 版本与接口地址（官方 / 中转）作为信息项展示不计分；
-已配中转时，API 直连不通不会按满额扣分。
 
-**未覆盖的信号**：WebRTC 泄漏、Client Hints、Sec-Fetch、Emoji 渲染风格、字体探测、
-Canvas/WebGL 指纹——这些只存在于浏览器 JS 环境，shell 拿不到，本工具不做假数据。
-它们影响的是 claude.ai **网页端**画像；Claude Code（CLI）不跑浏览器，不受这些信号影响。
+「浏览器」这 4 项由菜单栏 App 内一个**隐藏的 1px WKWebView** 跑检测 JS 采集
+（WebRTC / Intl / Canvas / WebGL / 字体探测），结果写进 `browser_signals` 供脚本读取。
+命令行单跑 `claude-check.sh` 时没有 WebView，这 4 项按中性（70%）计分，分数会略低于菜单栏里显示的。
+
+> 采集用的是 Safari 引擎，指纹与你实际用的 Chrome 不完全一致；它反映的是"这台机器 + 这条网络"的
+> 环境画像，不是某个浏览器的完整指纹。`navigator.userAgentData`（Client Hints）是 Chromium 独有，
+> WKWebView 没有，这项不做。
+
+### 一键修复
+
+| 问题 | 修复方式 |
+|---|---|
+| 系统时区与出口不符 | 全自动改（复用免密 `systemsetup`） |
+| PAC 自动分流 | 全自动关（`networksetup -setautoproxystate off`） |
+| DNS 泄漏 / 被污染 | 生成 Cloudflare **DoH 描述文件**并打开系统设置，点「安装」即可 |
+| 系统区域与出口不符 | 需显式 `--fix-locale`（会影响日期格式显示） |
+| 换节点 / 换住宅 IP / 固定线路 | 只能手动，报告里给出具体建议 |
+
+DNS 修复走 DoH 而不是直接改成 `1.1.1.1`：在国内，明文 DNS 换谁都会被投毒污染，只有加密 DNS 才真正解决泄漏。
+
+自动关 PAC 和改 DNS 需要一次授权：
+
+```bash
+sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSWD
+```
 
 菜单栏「Claude 环境 🟢 92 分」子菜单里可查看全部明细、问题与建议，并直接点「一键修复」。
 体检**只在出口 IP 变化或手动点击时触发**，不会每分钟去敲 Anthropic 接口。

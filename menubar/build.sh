@@ -7,7 +7,7 @@ APP="AutoTimezone.app"
 BIN="AutoTimezone"
 
 echo "编译 Swift ..."
-swiftc StatusApp.swift -o "$BIN" -framework Cocoa -O
+swiftc StatusApp.swift -o "$BIN" -framework Cocoa -framework WebKit -O
 
 echo "组装 .app 包 ..."
 rm -rf "$APP"
@@ -32,8 +32,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>AutoTimezone</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>1.3</string>
-    <key>CFBundleVersion</key>          <string>1.3</string>
+    <key>CFBundleShortVersionString</key> <string>1.4</string>
+    <key>CFBundleVersion</key>          <string>1.4</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

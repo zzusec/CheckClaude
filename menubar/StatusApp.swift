@@ -1,4 +1,5 @@
 import Cocoa
+import WebKit
 
 // auto-timezone 菜单栏监控 App (LSUIElement)
 // 自包含: 检测脚本打包在 App 内，数据写入用户的 Application Support 目录。
@@ -12,6 +13,7 @@ let baseDir: String = {
 }()
 let statusPath = (baseDir as NSString).appendingPathComponent("status")
 let claudeStatusPath = (baseDir as NSString).appendingPathComponent("claude_status")
+let browserPath = (baseDir as NSString).appendingPathComponent("browser_signals")
 let logPath = (baseDir as NSString).appendingPathComponent("auto-timezone.log")
 // 检测脚本: 优先用 App 包内 Resources 里的，开发时回退到源码目录
 func script(_ name: String) -> String {
@@ -26,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var uiTimer: Timer?
     var scanTimer: Timer?
     var lastExitIP = ""      // 出口 IP 变化时才重跑 Claude 环境体检
+    var probe: BrowserProbe?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.menu = NSMenu()
@@ -176,8 +179,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !ip.isEmpty, ip != "?" else { return }
         if ip != lastExitIP {
             lastExitIP = ip
-            runScript(["--quiet"], claudeScriptPath)
+            fullCheck()
         }
+    }
+
+    // 先用 WebView 采集浏览器信号，再跑体检脚本(脚本要读采集结果)
+    func fullCheck(_ args: [String] = ["--quiet"]) {
+        guard probe == nil else { return }          // 采集中就别叠加
+        probe = BrowserProbe(outPath: browserPath) { [weak self] in
+            guard let self else { return }
+            self.probe = nil
+            self.runScript(args, claudeScriptPath)
+        }
+        probe?.run()
     }
 
     func claudeMenuItem() -> NSMenuItem {
@@ -239,9 +253,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    @objc func runClaudeCheck() { runScript(["--quiet"], claudeScriptPath) }
-    @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
-    @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
+    @objc func runClaudeCheck() { fullCheck() }
+    @objc func runClaudeFix() { fullCheck(["--fix"]) }
+    @objc func runClaudeFixLocale() { fullCheck(["--fix-locale"]) }
 
     @objc func runCheck() { runScript(["--once"]) }
 
@@ -250,6 +264,166 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func quit() { NSApp.terminate(nil) }
+}
+
+// 浏览器端信号采集: 用一个隐藏的 WKWebView 跑检测 JS，拿 shell 拿不到的那部分信号
+// (WebRTC 泄漏 / Intl locale / 渲染指纹 / 字体 / Emoji)，结果写成 key=value 给 claude-check.sh 读。
+//
+// 注意: WKWebView 是 Safari 引擎，指纹与用户实际用的 Chrome 不完全一致；能反映的是
+// "这台机器 + 这条网络"的环境画像，不是某个浏览器的完整指纹。
+//
+// WebRTC 是这里最有价值的一项: 它走 UDP，不经过 HTTP 代理，所以能暴露代理没兜住的真实出口。
+final class BrowserProbe: NSObject, WKScriptMessageHandler {
+    private var webView: WKWebView?
+    private var window: NSWindow?
+    private var timeout: Timer?
+    private var done = false
+    private var collected: [String: Any] = [:]
+    private let outPath: String
+    private let completion: () -> Void
+
+    init(outPath: String, completion: @escaping () -> Void) {
+        self.outPath = outPath
+        self.completion = completion
+        super.init()
+    }
+
+    func run() {
+        let cfg = WKWebViewConfiguration()
+        cfg.userContentController.add(self, name: "cc")
+        let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 1, height: 1), configuration: cfg)
+        webView = wv
+        // 离屏窗口: WKWebView 不在窗口层级里时，系统会把 setTimeout 节流到几十秒，
+        // WebRTC 那段等不到结果。挂进一个屏幕外的 1px 窗口就恢复正常速度。
+        let w = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 1, height: 1),
+                         styleMask: .borderless, backing: .buffered, defer: false)
+        w.contentView = wv
+        w.alphaValue = 0.01
+        w.orderBack(nil)
+        window = w
+        wv.loadHTMLString(Self.html, baseURL: URL(string: "https://local.probe/"))
+        // JS 卡住(STUN 不通等)时兜底，别让菜单一直等
+        timeout = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.collected["rtc_timeout"] = "1"
+            self.finish(self.collected)
+        }
+    }
+
+    func userContentController(_ c: WKUserContentController, didReceive msg: WKScriptMessage) {
+        guard let d = msg.body as? [String: Any] else { return finish(["error": "返回格式异常"]) }
+        collected.merge(d) { _, new in new }
+        // JS 分两次发: 第一次是同步信号(语言/时区/指纹)，第二次带 WebRTC 结果。
+        // 先落盘一次，这样即便 STUN 不通也不会丢掉已拿到的信号。
+        if d["phase"] as? String == "final" { finish(collected) } else { write(collected) }
+    }
+
+    private func write(_ dict: [String: Any]) {
+        var txt = "time=\(Int(Date().timeIntervalSince1970))\n"
+        for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
+            txt += "\(k)=\(String(describing: v).replacingOccurrences(of: "\n", with: " "))\n"
+        }
+        try? txt.write(toFile: outPath, atomically: true, encoding: .utf8)
+    }
+
+    private func finish(_ dict: [String: Any]) {
+        guard !done else { return }
+        done = true
+        timeout?.invalidate()
+        write(dict)
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "cc")
+        window?.close(); window = nil
+        webView = nil
+        completion()
+    }
+
+    private static let html = """
+    <!doctype html><meta charset="utf-8"><body><script>
+    (async () => {
+      const out = {};
+      const send = (phase) => {
+        out.phase = phase;
+        try { webkit.messageHandlers.cc.postMessage(out); } catch(e){}
+      };
+      try {
+        // ── 浏览器身份画像 ──
+        out.languages = (navigator.languages || []).join(',');
+        const ro = Intl.DateTimeFormat().resolvedOptions();
+        out.tz = ro.timeZone || '';
+        out.locale = ro.locale || '';
+        out.tzoffset = String(-new Date().getTimezoneOffset() / 60);
+        out.platform = navigator.platform || '';
+        out.hw = String(navigator.hardwareConcurrency || '');
+
+        // ── 终端环境指纹: 渲染特征 ──
+        try {
+          const c = document.createElement('canvas'), x = c.getContext('2d');
+          x.textBaseline = 'top'; x.font = '14px Arial';
+          x.fillText('Claude环境检测', 2, 2);
+          const d = c.toDataURL();
+          let h = 0; for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) | 0;
+          out.canvas = (h >>> 0).toString(16);
+        } catch (e) { out.canvas = ''; }
+        try {
+          const gl = document.createElement('canvas').getContext('webgl');
+          const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+          out.webgl = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '';
+        } catch (e) { out.webgl = ''; }
+        // Emoji 风格: 苹果彩色字形与开源字形的绘制宽度不同，可粗判是不是原生 macOS 渲染
+        try {
+          const c = document.createElement('canvas'), x = c.getContext('2d');
+          x.font = '16px sans-serif';
+          out.emojiw = String(Math.round(x.measureText('\\u{1F600}').width * 10) / 10);
+        } catch (e) { out.emojiw = ''; }
+
+        // ── 字体探测: 装了哪些中文字体(国产终端弱信号) ──
+        try {
+          const probe = ['PingFang SC','Hiragino Sans GB','Microsoft YaHei','SimSun','Songti SC','STHeiti'];
+          const s = document.createElement('span');
+          s.style.cssText = 'position:absolute;left:-9999px;font-size:72px';
+          s.textContent = 'mmmmmmmmmmlli测试';
+          document.body.appendChild(s);
+          s.style.fontFamily = 'monospace'; const base = s.offsetWidth;
+          out.fonts = probe.filter(f => {
+            s.style.fontFamily = "'" + f + "',monospace";
+            return s.offsetWidth !== base;
+          }).join(',');
+          s.remove();
+        } catch (e) { out.fonts = ''; }
+
+        send('sync');   // 同步信号先落盘，WebRTC 慢或不通也不会连累它们
+
+        // ── WebRTC 泄漏: UDP 不走 HTTP 代理，能暴露代理没兜住的真实出口 ──
+        out.rtc_host = ''; out.rtc_srflx = '';
+        try {
+          const pc = new RTCPeerConnection({ iceServers: [
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            { urls: 'stun:stun.l.google.com:19302' }
+          ]});
+          pc.createDataChannel('probe');
+          const hosts = new Set(), srflx = new Set();
+          pc.onicecandidate = e => {
+            if (!e.candidate) return;
+            const c = e.candidate.candidate;
+            const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
+            if (!m) return;
+            if (c.indexOf('typ host') >= 0) hosts.add(m[1]);
+            if (c.indexOf('typ srflx') >= 0) srflx.add(m[1]);
+          };
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await new Promise(r => setTimeout(r, 4000));
+          out.rtc_host = [...hosts].join(',');
+          out.rtc_srflx = [...srflx].join(',');
+          pc.close();
+        } catch (e) { out.rtc_err = String(e).slice(0, 60); }
+      } catch (e) {
+        out.error = String(e).slice(0, 100);
+      }
+      send('final');
+    })();
+    </script></body>
+    """
 }
 
 let app = NSApplication.shared

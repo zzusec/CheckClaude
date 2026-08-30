@@ -4,8 +4,8 @@
 #
 # 评分模型参考 https://github.com/yacuo/check-cc (MIT)，但那边是浏览器端检测(WebRTC /
 # Client Hints / Emoji 渲染 / 字体探测靠 JS 拿)，这里是 macOS 本地实现: 凡是 shell 能测的
-# 信号全部覆盖(网络出口 / 服务可达 / 画像一致 / DNS 共 15 项)，浏览器独有的信号测不了，
-# 在报告里明确标注为"未覆盖"，不假装有。
+# 信号全部覆盖(出口/质量/画像/DNS/稳定 共 16 项)，浏览器独有的 4 项(WebRTC 泄漏、浏览器
+# 时区语言、渲染环境)由菜单栏 App 的隐藏 WKWebView 采集后写文件，这里读取，合计 20 项。
 #
 # 用法:
 #   ./claude-check.sh              # 体检并打印报告
@@ -182,6 +182,43 @@ parse_system() {
   PAC_ON=$([[ "$pac" == "1" ]] && echo 1 || echo 0)
 }
 
+# ── 采集: 环境稳定性 / 运行容器 ─────────────────────────────────
+# 账号画像里"设备连续性"这一项，网页端做不了(没有历史)，但我们有本地日志。
+parse_stability() {
+  IP_CHANGES=0
+  if [[ -f "$LOG" ]]; then
+    local since
+    since=$(date -v-24H '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+    IP_CHANGES=$(awk -v s="[$since]" '$0 >= s && /出口 IP 变化/' "$LOG" 2>/dev/null | wc -l | tr -d ' ')
+  fi
+  # 虚拟机里跑 = 设备指纹异常，是风控关注的信号
+  VM_HOST="物理机"
+  local hv model
+  hv=$(sysctl -n kern.hv_vmm_present 2>/dev/null)
+  model=$(sysctl -n hw.model 2>/dev/null)
+  [[ "$hv" == "1" ]] && VM_HOST="虚拟机"
+  case "$model" in VMware*|Parallels*|VirtualBox*|Virtual*) VM_HOST="虚拟机($model)" ;; esac
+}
+
+# ── 采集: 浏览器信号(菜单栏 App 的隐藏 WKWebView 写的) ──────────
+parse_browser() {
+  BR_OK=0; BR_TZ=""; BR_LANGS=""; BR_LOCALE=""; BR_RTC=""; BR_RTC_HOST=""
+  BR_FONTS=""; BR_WEBGL=""; BR_CANVAS=""; BR_AGE=999999
+  local f="$DATA_DIR/browser_signals"
+  [[ -f "$f" ]] || return 1
+  BR_AGE=$(( $(date +%s) - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
+  while IFS='=' read -r k v; do
+    case "$k" in
+      tz) BR_TZ="$v" ;; languages) BR_LANGS="$v" ;; locale) BR_LOCALE="$v" ;;
+      rtc_srflx) BR_RTC="$v" ;; rtc_host) BR_RTC_HOST="$v" ;; fonts) BR_FONTS="$v" ;;
+      webgl) BR_WEBGL="$v" ;; canvas) BR_CANVAS="$v" ;;
+    esac
+  done <"$f"
+  # 1 小时内、且拿到了时区，才认为这次采集有效
+  [[ $BR_AGE -lt 3600 && -n "$BR_TZ" ]] && BR_OK=1
+  return 0
+}
+
 # ── 采集: Claude Code 本地环境(信息项) ──────────────────────────
 parse_claude() {
   CLAUDE_VER=""; CLAUDE_BASE=""
@@ -204,40 +241,40 @@ compute_score() {
   local relay=0
   [[ -n "$CLAUDE_BASE" && "$CLAUDE_BASE" != *"api.anthropic.com"* ]] && relay=1
 
-  # ── A. 出口地区与服务可用 (45) ──
+  # ── A. 出口地区与服务可用 (35) ──
   if [[ -z "$COUNTRY" ]]; then
-    sig 出口 "出口国家" 22 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
+    sig 出口 "出口国家" 18 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
   elif in_list "$COUNTRY" "$UNSUPPORTED"; then
-    sig 出口 "出口国家" 22 0 "$COUNTRY 不支持" \
+    sig 出口 "出口国家" 18 0 "$COUNTRY 不支持" \
       "出口国家 ${COUNTRY} 不在 Anthropic 服务范围，登录/订阅/API 均有封号风险" \
       "切到美国/日本/新加坡等支持地区节点，并长期固定，不要频繁换国家"
   elif in_list "$COUNTRY" "$SUPPORTED"; then
-    sig 出口 "出口国家" 22 100 "$COUNTRY ${CITY:-}"
+    sig 出口 "出口国家" 18 100 "$COUNTRY ${CITY:-}"
   else
-    sig 出口 "出口国家" 22 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
+    sig 出口 "出口国家" 18 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
   fi
 
   if [[ "$API_CODE" == "401" || "$API_CODE" == "400" ]]; then
-    sig 出口 "Anthropic API 可达" 13 100 "HTTP $API_CODE"
+    sig 出口 "Anthropic API 可达" 10 100 "HTTP $API_CODE"
   elif [[ "$API_CODE" == "403" || "$API_REGION_BLOCK" == "1" ]]; then
-    sig 出口 "Anthropic API 可达" 13 0 "HTTP 403 地区拦截" \
+    sig 出口 "Anthropic API 可达" 10 0 "HTTP 403 地区拦截" \
       "api.anthropic.com 返回 403，当前出口被地区拦截" "更换支持地区节点；确认代理为全局而非 PAC 分流"
   elif [[ "$API_CODE" == "000" && $relay -eq 1 ]]; then
-    sig 出口 "Anthropic API 可达" 13 50 "直连不通(已配中转)" \
+    sig 出口 "Anthropic API 可达" 10 50 "直连不通(已配中转)" \
       "api.anthropic.com 直连不通，但你已配置中转 ${CLAUDE_BASE}" "只用中转可忽略；需直连官方则开全局代理"
   elif [[ "$API_CODE" == "000" ]]; then
-    sig 出口 "Anthropic API 可达" 13 0 "连不上" \
+    sig 出口 "Anthropic API 可达" 10 0 "连不上" \
       "api.anthropic.com 连不上(超时/DNS 污染)" "开启全局代理；检查 DNS 是否被污染"
   else
-    sig 出口 "Anthropic API 可达" 13 50 "HTTP $API_CODE" "api.anthropic.com 返回异常状态 ${API_CODE}" "稍后重试；持续异常则换节点"
+    sig 出口 "Anthropic API 可达" 10 50 "HTTP $API_CODE" "api.anthropic.com 返回异常状态 ${API_CODE}" "稍后重试；持续异常则换节点"
   fi
 
   case "$WEB_CODE" in
-    200|301|302|307) sig 出口 "claude.ai 可达" 7 100 "HTTP $WEB_CODE" ;;
-    403)             sig 出口 "claude.ai 可达" 7 20 "HTTP 403 被拦" \
+    200|301|302|307) sig 出口 "claude.ai 可达" 4 100 "HTTP $WEB_CODE" ;;
+    403)             sig 出口 "claude.ai 可达" 4 20 "HTTP 403 被拦" \
                        "claude.ai 返回 403(Cloudflare 地区拦截或风控挑战)" "换支持地区的干净节点，网页端登录前先确认能打开" ;;
-    000)             sig 出口 "claude.ai 可达" 7 0 "连不上" "claude.ai 连不上" "开启全局代理" ;;
-    *)               sig 出口 "claude.ai 可达" 7 60 "HTTP $WEB_CODE" ;;
+    000)             sig 出口 "claude.ai 可达" 4 0 "连不上" "claude.ai 连不上" "开启全局代理" ;;
+    *)               sig 出口 "claude.ai 可达" 4 60 "HTTP $WEB_CODE" ;;
   esac
 
   # 两家 IP 情报库对同一 IP 的判定是否一致
@@ -252,27 +289,27 @@ compute_score() {
     sig 出口 "多源情报一致" 3 50 "数据不足"
   fi
 
-  # ── B. 出口质量 (15) ──
+  # ── B. 出口质量 (12) ──
   if [[ "$PROXY" == "1" ]]; then
-    sig 质量 "IP 类型" 8 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
+    sig 质量 "IP 类型" 6 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
   elif [[ "$HOSTING" == "1" ]]; then
-    sig 质量 "IP 类型" 8 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
+    sig 质量 "IP 类型" 6 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
   elif [[ "$HOSTING" == "0" ]]; then
-    sig 质量 "IP 类型" 8 100 "住宅"
+    sig 质量 "IP 类型" 6 100 "住宅"
   else
-    sig 质量 "IP 类型" 8 70 "未知"
+    sig 质量 "IP 类型" 6 70 "未知"
   fi
 
   # Cloudflare 边缘机房国家 vs IP 库国家: 不一致说明 IP 归属被"改过"或链路绕路
   if [[ -n "$CF_LOC" && -n "$COUNTRY" ]]; then
     if [[ "$CF_LOC" == "$COUNTRY" ]]; then
-      sig 质量 "边缘机房匹配" 4 100 "${CF_COLO} (${CF_LOC})"
+      sig 质量 "边缘机房匹配" 3 100 "${CF_COLO} (${CF_LOC})"
     else
-      sig 质量 "边缘机房匹配" 4 25 "${CF_COLO}(${CF_LOC}) ≠ ${COUNTRY}" \
+      sig 质量 "边缘机房匹配" 3 25 "${CF_COLO}(${CF_LOC}) ≠ ${COUNTRY}" \
         "Cloudflare 边缘落在 ${CF_LOC}，与 IP 库归属 ${COUNTRY} 不一致" "该 IP 的地理归属可能是伪造的，换归属真实的节点"
     fi
   else
-    sig 质量 "边缘机房匹配" 4 50 "${CF_COLO:-未知}"
+    sig 质量 "边缘机房匹配" 3 50 "${CF_COLO:-未知}"
   fi
 
   # Cloudflare 看到的来源 IP 应与三路检测拿到的一致，否则中间还有一层出口
@@ -287,20 +324,20 @@ compute_score() {
     sig 质量 "出口链路单一" 3 50 "数据不足"
   fi
 
-  # ── C. 画像一致性 (25) ──
+  # ── C. 地区画像一致性 (18) ──
   if [[ "$CONSISTENT" == "1" ]]; then
-    sig 画像 "三路出口一致" 8 100 "$PROBE_IP"
+    sig 画像 "三路出口一致" 6 100 "$PROBE_IP"
   else
-    sig 画像 "三路出口一致" 8 30 "不一致" \
+    sig 画像 "三路出口一致" 6 30 "不一致" \
       "三路出口 IP 不一致(分流/PAC/DNS 泄漏)，账号画像会在多地区间跳变" "代理切全局模式，让国内/国外/谷歌三路走同一出口"
   fi
 
   if [[ -n "$GFW_TZ" && "$GFW_TZ" == "$SYS_TZ" ]]; then
-    sig 画像 "系统时区匹配出口" 7 100 "$SYS_TZ"
+    sig 画像 "系统时区匹配出口" 5 100 "$SYS_TZ"
   elif [[ -z "$GFW_TZ" || "$GFW_TZ" == "?" ]]; then
-    sig 画像 "系统时区匹配出口" 7 50 "出口时区未知" "无法解析出口 IP 对应时区"
+    sig 画像 "系统时区匹配出口" 5 50 "出口时区未知" "无法解析出口 IP 对应时区"
   else
-    sig 画像 "系统时区匹配出口" 7 0 "$SYS_TZ ≠ $GFW_TZ" \
+    sig 画像 "系统时区匹配出口" 5 0 "$SYS_TZ ≠ $GFW_TZ" \
       "系统时区 ${SYS_TZ} 与出口时区 ${GFW_TZ} 不一致，是典型的环境矛盾信号" "可一键修复: 把系统时区改为 ${GFW_TZ}"
     FIXABLE_TZ="$GFW_TZ"
   fi
@@ -326,32 +363,93 @@ compute_score() {
     FIXABLE_LOCALE="$COUNTRY"
   fi
 
-  if [[ "$PAC_ON" == "1" ]]; then
-    sig 画像 "代理形态" 3 20 "$PROXY_MODE" \
-      "启用了 PAC 自动分流，不同网站会走不同出口，账号画像不稳定" "关掉 PAC，改用 TUN 全局模式"
-  elif [[ "$PROXY_MODE" == "TUN 全局" ]]; then
-    sig 画像 "代理形态" 3 100 "$PROXY_MODE"
-  else
-    sig 画像 "代理形态" 3 70 "$PROXY_MODE"
-  fi
-
-  # ── D. DNS (15) ──
+  # ── D. DNS (10) ──
   case "$DNS_VERDICT" in
-    正常*|代理接管*) sig DNS "claude.ai 解析" 9 100 "$DNS_VERDICT" ;;
-    被污染*)        sig DNS "claude.ai 解析" 9 0 "$DNS_VERDICT" \
+    正常*|代理接管*) sig DNS "claude.ai 解析" 6 100 "$DNS_VERDICT" ;;
+    被污染*)        sig DNS "claude.ai 解析" 6 0 "$DNS_VERDICT" \
                       "claude.ai 的 DNS 解析被污染(${DNS_RESULT})" "换 DoH/加密 DNS，或让代理接管 DNS(fake-ip 模式)" ;;
-    解析失败)       sig DNS "claude.ai 解析" 9 20 "失败" "claude.ai 无法解析" "检查 DNS 设置，建议让代理接管 DNS" ;;
-    *)              sig DNS "claude.ai 解析" 9 40 "$DNS_VERDICT" \
+    解析失败)       sig DNS "claude.ai 解析" 6 20 "失败" "claude.ai 无法解析" "检查 DNS 设置，建议让代理接管 DNS" ;;
+    *)              sig DNS "claude.ai 解析" 6 40 "$DNS_VERDICT" \
                       "claude.ai 解析到非 Cloudflare 地址(${DNS_RESULT})，可能被劫持" "换 DoH/加密 DNS 或由代理接管 DNS" ;;
   esac
 
   case "$DNS_SCOPE" in
-    本地/代理接管*) sig DNS "DNS 出口" 6 100 "$DNS_SCOPE" ;;
-    国内公共DNS*)   sig DNS "DNS 出口" 6 0 "$DNS_SCOPE" \
+    本地/代理接管*) sig DNS "DNS 出口" 4 100 "$DNS_SCOPE" ;;
+    国内公共DNS*)   sig DNS "DNS 出口" 4 0 "$DNS_SCOPE" \
                       "正在用${DNS_SCOPE}，DNS 查询泄漏到国内，与国外出口矛盾" \
                       "改用 1.1.1.1 / 8.8.8.8 或让代理接管 DNS" ;;
-    *)              sig DNS "DNS 出口" 6 80 "$DNS_SCOPE" ;;
+    *)              sig DNS "DNS 出口" 4 80 "$DNS_SCOPE" ;;
   esac
+
+  # ── E. 环境稳定性 / 运行容器 (10) ──
+  if [[ "$PAC_ON" == "1" ]]; then
+    sig 稳定 "代理形态" 3 20 "$PROXY_MODE" \
+      "启用了 PAC 自动分流，不同网站会走不同出口，账号画像不稳定" "关掉 PAC，改用 TUN 全局模式"
+  elif [[ "$PROXY_MODE" == "TUN 全局" ]]; then
+    sig 稳定 "代理形态" 3 100 "$PROXY_MODE"
+  else
+    sig 稳定 "代理形态" 3 70 "$PROXY_MODE"
+  fi
+
+  if   [[ $IP_CHANGES -le 1 ]]; then sig 稳定 "出口稳定性" 4 100 "24h 内 ${IP_CHANGES} 次跳变"
+  elif [[ $IP_CHANGES -le 5 ]]; then
+    sig 稳定 "出口稳定性" 4 50 "24h 内 ${IP_CHANGES} 次跳变" \
+      "24 小时内出口 IP 变了 ${IP_CHANGES} 次，设备连续性差" "固定一个节点用，别让代理自动切换线路"
+  else
+    sig 稳定 "出口稳定性" 4 0 "24h 内 ${IP_CHANGES} 次跳变" \
+      "24 小时内出口 IP 变了 ${IP_CHANGES} 次，账号画像极不稳定" "关掉代理的自动切换/负载均衡，固定单一落地节点"
+  fi
+
+  if [[ "$VM_HOST" == "物理机" ]]; then
+    sig 稳定 "运行容器" 3 100 "物理机"
+  else
+    sig 稳定 "运行容器" 3 30 "$VM_HOST" \
+      "运行在${VM_HOST}中，设备指纹异常是风控关注的信号" "尽量在物理机上登录和使用 Claude"
+  fi
+
+  # ── F. 浏览器画像 (15) —— 由菜单栏 App 的隐藏 WKWebView 采集 ──
+  if [[ "$BR_OK" != "1" ]]; then
+    # 没采集到就按中性计分(70%)，不能因为"没测"判环境有问题，也不能白送满分。
+    # 命令行单跑时没有 WebView，分数会比菜单栏里低几分，属预期。
+    sig 浏览器 "WebRTC 出口" 6 70 "未采集"
+    sig 浏览器 "浏览器时区" 4 70 "未采集"
+    sig 浏览器 "浏览器语言" 3 70 "未采集"
+    sig 浏览器 "渲染环境" 2 70 "未采集"
+  else
+    # WebRTC 走 UDP，不经过 HTTP 代理，能暴露代理没兜住的真实出口
+    if [[ -z "$BR_RTC" ]]; then
+      sig 浏览器 "WebRTC 出口" 6 100 "无泄漏(未拿到公网候选)"
+    elif [[ "$BR_RTC" == *"$PROBE_IP"* ]]; then
+      sig 浏览器 "WebRTC 出口" 6 100 "$BR_RTC = 出口"
+    else
+      sig 浏览器 "WebRTC 出口" 6 0 "$BR_RTC ≠ $PROBE_IP" \
+        "WebRTC 暴露了另一个出口 ${BR_RTC}，与代理出口 ${PROBE_IP} 不同——UDP 绕过了代理" \
+        "代理开 TUN 全局(接管 UDP)，或在浏览器里禁用 WebRTC"
+    fi
+
+    if [[ "$BR_TZ" == "$SYS_TZ" ]]; then
+      sig 浏览器 "浏览器时区" 4 100 "$BR_TZ"
+    else
+      sig 浏览器 "浏览器时区" 4 25 "$BR_TZ ≠ $SYS_TZ" \
+        "浏览器时区 ${BR_TZ} 与系统时区 ${SYS_TZ} 不一致" "重启浏览器让它重新读系统时区"
+    fi
+
+    # 浏览器语言是网页端最直接的地区信号: 中文 + 国外出口是最常见的矛盾组合
+    if [[ -n "$COUNTRY" && "$BR_LANGS" == zh* && ! " $UNSUPPORTED " == *" $COUNTRY "* ]]; then
+      sig 浏览器 "浏览器语言" 3 40 "$BR_LANGS vs $COUNTRY" \
+        "浏览器语言 ${BR_LANGS} 与出口地区 ${COUNTRY} 矛盾(网页端登录时直接可见)" \
+        "网页端登录前把浏览器首选语言调成 en-US"
+    else
+      sig 浏览器 "浏览器语言" 3 100 "${BR_LANGS:-?}"
+    fi
+
+    # 渲染环境: 拿到 WebGL 渲染器 = 真实 GPU 环境，拿不到多半在虚拟化/无头环境
+    if [[ -n "$BR_WEBGL" ]]; then
+      sig 浏览器 "渲染环境" 2 100 "${BR_WEBGL:0:28}"
+    else
+      sig 浏览器 "渲染环境" 2 50 "未取到 GPU 信息"
+    fi
+  fi
 
   if   [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
   elif [[ $SCORE -ge 70 ]]; then GRADE="良好"; VERDICT="基本可用，建议修复下列项"
@@ -478,6 +576,9 @@ write_cstatus() {
     echo "consistent=${CONSISTENT}"; echo "systz=${SYS_TZ}"; echo "iptz=${GFW_TZ:-?}"
     echo "tzoffset=${TZ_OFFSET} ${TZ_ABBR}"; echo "locale=${SYS_LOCALE:-?}"; echo "langs=${SYS_LANGS:-?}"
     echo "os=${OS_VER}"; echo "proxymode=${PROXY_MODE}"
+    echo "vmhost=${VM_HOST}"; echo "ipchanges=${IP_CHANGES}"
+    echo "brtz=${BR_TZ:-未采集}"; echo "brlangs=${BR_LANGS:-未采集}"
+    echo "brrtc=${BR_RTC:-无}"; echo "brfonts=${BR_FONTS:-?}"; echo "brwebgl=${BR_WEBGL:-?}"
     echo "dns=${DNS_SCOPE}"; echo "dnsresult=${DNS_VERDICT}"
     echo "claudever=${CLAUDE_VER:-未安装}"; echo "base=${CLAUDE_BASE:-官方}"
     echo "fixable=$( [[ -n "$(fixable_list)" ]] && echo 1 || echo 0 )"
@@ -505,9 +606,14 @@ print_report() {
   done
   echo ""
   echo "  出口 ${PROBE_IP} · ${COUNTRY_NAME:-?} ${CITY:-} · ${ISP:-?} · ${ASN:-?}"
-  echo "  系统 ${OS_VER} · ${SYS_LOCALE:-?} · ${SYS_TZ} · ${PROXY_MODE}"
+  echo "  系统 ${OS_VER} · ${SYS_LOCALE:-?} · ${SYS_TZ} · ${PROXY_MODE} · ${VM_HOST}"
   echo "  DNS  ${DNS_SCOPE} · claude.ai → ${DNS_VERDICT}"
   echo "  CLI  ${CLAUDE_VER:-未检测到} · 接口 ${CLAUDE_BASE:-官方}"
+  if [[ "$BR_OK" == "1" ]]; then
+    echo "  浏览 ${BR_TZ} · ${BR_LANGS} · WebRTC ${BR_RTC:-无泄漏} · ${BR_FONTS:-无中文字体}"
+  else
+    echo "  浏览 未采集(浏览器信号由菜单栏 App 的隐藏 WebView 提供，命令行单跑时没有)"
+  fi
   if [[ -n "$ISSUES" ]]; then
     echo ""; echo "  发现的问题"
     echo "$ISSUES" | tr '|' '\n' | sed 's/^/    • /'
@@ -526,6 +632,8 @@ main() {
   parse_net
   parse_dns
   parse_system
+  parse_stability
+  parse_browser
   parse_claude
   compute_score
   if [[ $DO_FIX -eq 1 ]]; then
