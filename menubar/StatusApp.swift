@@ -224,11 +224,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sub.addItem(.separator())
         sub.addItem(action("重新体检", #selector(runClaudeCheck)))
-        if c["fixable"] == "1" {
-            sub.addItem(action("一键修复(时区)", #selector(runClaudeFix)))
+        if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
+            sub.addItem(action("一键修复：\(list)", #selector(runClaudeFix)))
         }
         if let cc = c["country"], cc != "?", (c["locale"] ?? "").hasSuffix("_\(cc)") == false {
             sub.addItem(action("把系统区域改为 \(cc)", #selector(runClaudeFixLocale)))
+        }
+        if c["needsudo"] == "1" {
+            sub.addItem(disabled("⚠️ 部分修复需授权：sudo bash enable-auto-timezone.sh"))
         }
 
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
