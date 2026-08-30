@@ -12,10 +12,12 @@ APP="/Applications/CheckClaude.app"
 DATA_DIR="${AUTO_TZ_DIR:-$HOME/Library/Application Support/CheckClaude}"
 mkdir -p "$DATA_DIR" 2>/dev/null || true
 USTATUS="$DATA_DIR/update_status"
+USTATE="$DATA_DIR/upgrade_state"      # 升级进行到哪一步，菜单栏据此显示进度
 LOG="$DATA_DIR/auto-timezone.log"
 AGENT="com.hx10.checkclaude"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG" 2>/dev/null || true; }
+state() { echo "$1" >"$USTATE" 2>/dev/null || true; }
 notify() { osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1; }
 
 current_version() {
@@ -65,11 +67,31 @@ do_install() {
 
   echo "→ 下载 v${latest} ..."
   notify "CheckClaude" "正在下载 v${latest} …"
+  state "下载中 0%"
   tmp=$(mktemp -d); mnt="$tmp/mnt"; mkdir -p "$mnt"
-  if ! curl -fL -m 180 -o "$tmp/CheckClaude.dmg" \
-      "https://github.com/${REPO}/releases/latest/download/CheckClaude.dmg" 2>/dev/null; then
-    echo "  ✗ 下载失败"; notify "升级失败" "下载不了 dmg，检查网络后重试"; rm -rf "$tmp"; exit 1
+  local url="https://github.com/${REPO}/releases/latest/download/CheckClaude.dmg"
+
+  # 后台下载 + 轮询文件大小算百分比 —— 点了升级之后没有任何反馈，
+  # 用户不知道是在下载还是卡死了。
+  local total cpid cur pct
+  total=$(curl -sIL -m 20 "$url" 2>/dev/null | grep -i '^content-length:' | tail -1 | tr -dc '0-9')
+  curl -fL -m 180 -o "$tmp/CheckClaude.dmg" "$url" 2>/dev/null &
+  cpid=$!
+  while kill -0 "$cpid" 2>/dev/null; do
+    cur=$(stat -f%z "$tmp/CheckClaude.dmg" 2>/dev/null || echo 0)
+    if [[ -n "$total" && "$total" -gt 0 ]]; then
+      pct=$(( cur * 100 / total )); [[ $pct -gt 99 ]] && pct=99
+      state "下载中 ${pct}%"
+    else
+      state "下载中 $(( cur / 1024 )) KB"
+    fi
+    sleep 1
+  done
+  if ! wait "$cpid"; then
+    echo "  ✗ 下载失败"; state "失败：下载不了 dmg"
+    notify "升级失败" "下载不了 dmg，检查网络后重试"; rm -rf "$tmp"; exit 1
   fi
+  state "下载完成，正在安装"
 
   if ! hdiutil attach -nobrowse -quiet "$tmp/CheckClaude.dmg" -mountpoint "$mnt" 2>/dev/null; then
     echo "  ✗ 挂载失败"; notify "升级失败" "dmg 挂载失败"; rm -rf "$tmp"; exit 1
@@ -79,6 +101,7 @@ do_install() {
   fi
 
   echo "→ 安装到 $APP"
+  state "安装中"
   # 先删再拷: 直接覆盖正在运行的 .app 会 Text file busy；删掉后旧进程靠已打开的
   # inode 继续跑到 kickstart 为止，是安全的。
   rm -rf "$APP"
@@ -87,6 +110,7 @@ do_install() {
   hdiutil detach "$mnt" -quiet 2>/dev/null
   rm -rf "$tmp"
 
+  state "完成，正在重启"
   log "upgrade: ${cur} -> ${latest} 安装完成"
   notify "CheckClaude 已升级" "${cur} → ${latest}，正在重启"
   do_check >/dev/null
