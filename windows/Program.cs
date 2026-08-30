@@ -1115,13 +1115,36 @@ namespace CheckClaude
             }
         }
 
-        static Color ScoreColor(int score)
+        // 用户的标准是二元的: 不是绿色就别用 Claude。
+        // 绿=可用(>=85 分且三路一致)，橙=有隐患，红=不建议使用。
+        static Color ScoreColor(int score, bool consistent)
         {
             if (score < 0) return Color.Gray;
-            if (score >= 85) return Color.FromArgb(52, 199, 89);
-            if (score >= 70) return Color.FromArgb(255, 204, 0);
-            if (score >= 50) return Color.FromArgb(255, 149, 0);
+            if (score >= 85 && consistent) return Color.FromArgb(52, 199, 89);
+            if (score >= 70 && consistent) return Color.FromArgb(255, 149, 0);
             return Color.FromArgb(255, 59, 48);
+        }
+
+        // 掉档时主动弹气泡 —— 用户不会一直盯着托盘图标。同一档不重复打扰。
+        string lastSafetyTier = "";
+        void AlertIfUnsafe(int score, bool consistent, string verdict)
+        {
+            if (score < 0) return;
+            string tier = (score >= 85 && consistent) ? "safe"
+                        : (score >= 70 && consistent) ? "warn" : "unsafe";
+            string prev = lastSafetyTier;
+            lastSafetyTier = tier;
+            if (string.IsNullOrEmpty(prev) || tier == prev) return;
+
+            if (tier == "safe")
+                icon.ShowBalloonTip(6000, "Claude 环境已恢复", score + " 分，可以正常使用", ToolTipIcon.Info);
+            else if (tier == "warn")
+                icon.ShowBalloonTip(8000, "⚠️ 不建议使用 Claude",
+                    "环境 " + score + " 分存在隐患，右键托盘查看还差哪几项", ToolTipIcon.Warning);
+            else
+                icon.ShowBalloonTip(10000, "⚠️ 不建议使用 Claude",
+                    string.IsNullOrEmpty(verdict) ? "环境 " + score + " 分，存在安全风险" : verdict,
+                    ToolTipIcon.Warning);
         }
 
         void RunExitProbe()
@@ -1255,7 +1278,9 @@ namespace CheckClaude
             var m = icon.ContextMenuStrip;
             m.Items.Clear();
             int score = report == null ? -1 : report.Score;
-            icon.Icon = MakeIcon(ScoreColor(score));
+            bool consistent = report != null && report.F.Consistent;
+            AlertIfUnsafe(score, consistent, report == null ? "" : report.Verdict);
+            icon.Icon = MakeIcon(ScoreColor(score, consistent));
             icon.Text = report == null ? "CheckClaude 检测中…" : ("CheckClaude " + score + " 分 · " + report.Grade);
 
             if (report == null) { m.Items.Add(Item("正在检测…")); }
