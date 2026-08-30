@@ -96,5 +96,13 @@ base_signals; BR_OK=0; compute_score
 check "浏览器组拿到 9/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 9
 check "不产生误报问题" "$(echo "$ISSUES" | grep -c 浏览器)" 0
 
+echo "⑫ TUN 全局下 DNS 走隧道，不该按泄漏扣满分"
+base_signals; DNS_SCOPE="国内公共DNS(223.5.5.5)"; PROXY_MODE="TUN 全局"; compute_score
+tun_dns=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r g l _ p _ <<<"$r"; [[ $l == "DNS 出口" ]] && echo $p; done)
+check "TUN 下拿 2/4" "$tun_dns" 2
+base_signals; DNS_SCOPE="国内公共DNS(223.5.5.5)"; PROXY_MODE="直连"; compute_score
+plain_dns=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r g l _ p _ <<<"$r"; [[ $l == "DNS 出口" ]] && echo $p; done)
+check "非 TUN 下扣光" "$plain_dns" 0
+
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }
