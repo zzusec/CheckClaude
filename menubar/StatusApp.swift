@@ -436,21 +436,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func runCheck() { runScript(["--once"]) }
 
-    // 有新版就持续提醒，但每天最多一次 —— 只弹一次的话，错过就再也不提了；
-    // 每 30 秒重画菜单都弹又会烦死人。
+    // 发现新版直接弹对话框问要不要装 —— 纯通知只是告知，用户还得自己去菜单栏找入口，太绕。
+    // 每天最多弹一次: 只弹一次会错过，每次重画菜单都弹会烦死人。
+    var promptingUpgrade = false
     func notifyNewVersion(_ latest: String) {
         let d = UserDefaults.standard
         let key = "notifiedVersion", tsKey = "notifiedAt"
         let sameVersion = d.string(forKey: key) == latest
-        let last = d.double(forKey: tsKey)
-        let elapsed = Date().timeIntervalSince1970 - last
+        let elapsed = Date().timeIntervalSince1970 - d.double(forKey: tsKey)
         guard !sameVersion || elapsed > 86400 else { return }
+        guard !promptingUpgrade else { return }
+        promptingUpgrade = true
         d.set(latest, forKey: key)
         d.set(Date().timeIntervalSince1970, forKey: tsKey)
-        notify("CheckClaude 有新版本 v\(latest)", "点菜单栏图标 →「⬆ 升级到 v\(latest)」一键更新")
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { self.promptingUpgrade = false }
+            let cur = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            NSApp.activate(ignoringOtherApps: true)
+            let a = NSAlert()
+            a.messageText = "CheckClaude 有新版本 v\(latest)"
+            a.informativeText = "当前 v\(cur)。点「立即升级」自动下载、安装并重启，无需其它操作。"
+            a.alertStyle = .informational
+            a.addButton(withTitle: "立即升级")
+            a.addButton(withTitle: "稍后提醒")
+            if a.runModal() == .alertFirstButtonReturn {
+                self.notify("正在升级到 v\(latest)", "下载完成后会自动重启")
+                self.runScript(["--install"], upgradeScriptPath)
+            }
+        }
     }
 
-    // 点了必须有回音 —— 之前静默执行，已是最新时看着就像"点了没反应"
     @objc func checkUpdate() {
         notify("正在检查更新…", "")
         runScript(["--check"], upgradeScriptPath) { [weak self] in
