@@ -42,7 +42,7 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 - 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
 
-## Claude 运行环境体检（v1.4）
+## Claude 运行环境体检（v1.5）
 
 判断当前环境是否适合运行 Claude / Claude Code：打分 + 问题清单 + 修复建议 + 自动修复。
 评分模型参考 [check-cc](https://github.com/yacuo/check-cc) 的多信号加权思路，改为 macOS 本地实现，
@@ -95,11 +95,16 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 |---|---|
 | 系统时区与出口不符 | 全自动改（复用免密 `systemsetup`） |
 | PAC 自动分流 | 全自动关（`networksetup -setautoproxystate off`） |
-| DNS 泄漏 / 被污染 | 生成 Cloudflare **DoH 描述文件**并打开系统设置，点「安装」即可 |
+| DNS 泄漏 / 被污染 | 全自动换成境外 DNS——**先验证**候选能正确解析 `claude.ai` 再改，并备份原值 |
 | 系统区域与出口不符 | 需显式 `--fix-locale`（会影响日期格式显示） |
 | 换节点 / 换住宅 IP / 固定线路 | 只能手动，报告里给出具体建议 |
 
-DNS 修复走 DoH 而不是直接改成 `1.1.1.1`：在国内，明文 DNS 换谁都会被投毒污染，只有加密 DNS 才真正解决泄漏。
+DNS 修复先拿 `1.1.1.1 / 8.8.8.8 / 9.9.9.9` 各解析一次 `claude.ai`，确认拿到 Anthropic/Cloudflare 真实地址
+（没被投毒）才写入系统，原值备份在 `dns_backup`，撤销一条命令。三家全被投毒时才退回 DoH 描述文件。
+
+> **DoH 描述文件不作为首选**：macOS 把 DNS Settings 实现成 Network Extension，机器上跑着
+> FlClash / Surge / Clash Verge 这类带 TUN 的代理时安装会失败，报
+> `The VPN service could not be created`。要用它得先退出代理 App。
 
 自动关 PAC 和改 DNS 需要一次授权：
 
