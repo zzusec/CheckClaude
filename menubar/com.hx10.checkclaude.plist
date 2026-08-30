@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.hx10.auto-timezone-menubar</string>
+    <string>com.hx10.checkclaude</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/AutoTimezone.app/Contents/MacOS/AutoTimezone</string>
+        <string>/Applications/CheckClaude.app/Contents/MacOS/CheckClaude</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
