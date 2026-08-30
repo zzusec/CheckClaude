@@ -127,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 光看 IP 一致但分数掉到 60 分，图标还是绿的，等于没提醒。
         let cs = readStatus(claudeStatusPath)
         let claudeScore = Int(cs["score"] ?? "") ?? -1
-        let safe = claudeScore >= 85 && consistent == "1"
+        let safe = claudeScore >= 90 && consistent == "1"
         alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
 
         if let btn = item.button {
@@ -268,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func alertIfUnsafe(_ score: Int, consistent: String, verdict: String) {
         guard score >= 0 else { return }
         let tier: String
-        if score >= 85 && consistent == "1" { tier = "safe" }
+        if score >= 90 && consistent == "1" { tier = "safe" }
         else if score >= 70 && consistent == "1" { tier = "warn" }
         else { tier = "unsafe" }
 

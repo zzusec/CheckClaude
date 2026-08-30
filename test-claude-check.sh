@@ -120,5 +120,12 @@ check "评级为风险" "$GRADE" 风险
 check "点名分流" "$(echo "$VERDICT" | grep -c "出口 IP 分流")" 1
 check "三路不一致硬降级不受分数影响" "$([[ $SCORE -ge 70 ]] && echo yes)" yes
 
+echo "⑮ 85-89 分不算可用(绿档门槛是 90)"
+base_signals; compute_score
+# 造一个 87 分左右的环境: 时区不匹配扣 5 分 + 语言变体扣 1 分
+SYS_TZ=Asia/Shanghai; GFW_TZ=America/New_York; SYS_LOCALE=zh_CN; SYS_LANG=zh; LOCALE_CC=CN; HOSTING=1
+compute_score
+check "85-89 分不叫优秀" "$([[ $SCORE -ge 85 && $SCORE -lt 90 && $GRADE != 优秀 ]] && echo yes || echo "$SCORE/$GRADE")" yes
+
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }
