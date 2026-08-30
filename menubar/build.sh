@@ -19,6 +19,8 @@ cp ../auto-timezone.sh "$APP/Contents/Resources/auto-timezone.sh"
 chmod +x "$APP/Contents/Resources/auto-timezone.sh"
 cp ../claude-check.sh "$APP/Contents/Resources/claude-check.sh"
 chmod +x "$APP/Contents/Resources/claude-check.sh"
+cp ../upgrade.sh "$APP/Contents/Resources/upgrade.sh"
+chmod +x "$APP/Contents/Resources/upgrade.sh"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat >"$APP/Contents/Info.plist" <<'PLIST'
@@ -32,8 +34,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>CheckClaude</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>2.0</string>
-    <key>CFBundleVersion</key>          <string>2.0</string>
+    <key>CFBundleShortVersionString</key> <string>2.1</string>
+    <key>CFBundleVersion</key>          <string>2.1</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

@@ -16,6 +16,10 @@
 		<data>
 		kPZUTmeMl7G79oQdz8yndk6WssI=
 		</data>
+		<key>Resources/upgrade.sh</key>
+		<data>
+		ooVtU4FB3EPeFl0qg14cfkjnInA=
+		</data>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -38,6 +42,13 @@
 			<key>hash2</key>
 			<data>
 			wsXlUnQR66YGxqJNeRomn5mbdHJ1aMIZDq2lQjyMd1U=
+			</data>
+		</dict>
+		<key>Resources/upgrade.sh</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			jDvJxD3vXVJV09NTDrXUONdg3gTXAvXRZO8Etvdmbmw=
 			</data>
 		</dict>
 	</dict>
