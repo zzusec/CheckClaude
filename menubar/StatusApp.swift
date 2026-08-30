@@ -123,12 +123,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let city = gfwtz.contains("/")
             ? (gfwtz.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") } ?? "")
             : ""
+        // 图标要反映"这台机器现在能不能安全跑 Claude"，而不只是三路 IP 一致性 ——
+        // 光看 IP 一致但分数掉到 60 分，图标还是绿的，等于没提醒。
+        let cs = readStatus(claudeStatusPath)
+        let claudeScore = Int(cs["score"] ?? "") ?? -1
+        let safe = claudeScore >= 85 && consistent == "1"
+        alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
+
         if let btn = item.button {
-            // 三路一致=绿勾✓ 不一致=红叉✗ 无数据=灰问号 (仅图标一个勾/叉，文字只放城市名)
+            // 综合判定: 安全=绿勾 / 有隐患=黄感叹号 / 不建议使用=红叉 / 无数据=灰问号
             let symName: String
             let color: NSColor
-            if consistent == "1" { symName = "checkmark.circle.fill"; color = .systemGreen }
-            else if s.isEmpty { symName = "questionmark.circle"; color = .systemGray }
+            if claudeScore < 0 && s.isEmpty { symName = "questionmark.circle"; color = .systemGray }
+            else if safe { symName = "checkmark.circle.fill"; color = .systemGreen }
+            else if claudeScore >= 70 && consistent == "1" { symName = "exclamationmark.triangle.fill"; color = .systemOrange }
             else { symName = "xmark.circle.fill"; color = .systemRed }
             // 颜色只作用在勾/叉图标上(paletteColors)，不用 contentTintColor 以免染到文字
             let conf = NSImage.SymbolConfiguration(paletteColors: [color])
@@ -251,6 +259,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let i = NSMenuItem(title: t, action: sel, keyEquivalent: "")
         i.target = self
         return i
+    }
+
+    // 状态跌到"不建议使用"时主动弹通知 —— 用户不会一直盯着菜单栏图标。
+    // 只在档位变化时弹，同一档不重复打扰。
+    var lastSafetyTier = ""
+    func alertIfUnsafe(_ score: Int, consistent: String, verdict: String) {
+        guard score >= 0 else { return }
+        let tier: String
+        if score >= 85 && consistent == "1" { tier = "safe" }
+        else if score >= 70 && consistent == "1" { tier = "warn" }
+        else { tier = "unsafe" }
+
+        defer { lastSafetyTier = tier }
+        guard !lastSafetyTier.isEmpty, tier != lastSafetyTier else { return }
+
+        switch tier {
+        case "unsafe":
+            notify("⚠️ 不建议使用 Claude", verdict.isEmpty ? "环境 \(score) 分，存在安全风险，点菜单栏查看" : verdict)
+        case "warn":
+            // 用户的标准是二元的: 不是绿色就别用。橙档虽然比红档轻，措辞一样不留余地。
+            notify("⚠️ 不建议使用 Claude", "环境 \(score) 分存在隐患，点菜单栏看还差哪几项")
+        default:
+            notify("Claude 环境已恢复", "\(score) 分，可以正常使用")
+        }
     }
 
     // ── Claude 环境体检 ──────────────────────────────────────────
