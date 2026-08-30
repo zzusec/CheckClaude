@@ -21,13 +21,16 @@ base_signals() {
   PROXY_MODE="TUN 全局"; PAC_ON=0
   DNS_VERDICT="正常(Cloudflare)"; DNS_RESULT=104.18.1.1; DNS_SCOPE="本地/代理接管"
   CLAUDE_BASE=""; CLAUDE_VER=test
+  IP_CHANGES=0; VM_HOST=物理机
+  BR_OK=1; BR_TZ=America/Los_Angeles; BR_LANGS=en-US,en; BR_LOCALE=en-US
+  BR_RTC=1.2.3.4; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"
 }
 
 echo "① 完美环境 => 100 分且无问题"
 base_signals; compute_score
 check "满分" "$SCORE" 100
 check "无问题" "$ISSUES" ""
-check "14 项信号" "${#SIGNALS[@]}" 14
+check "20 项信号" "${#SIGNALS[@]}" 20
 
 echo "② 权重表合计必须正好 100(防止加信号时算错总分)"
 total=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r _ _ w _ _ <<<"$r"; total=$((total+w)); done
@@ -54,9 +57,9 @@ check "标记时区可修" "$FIXABLE_TZ" America/New_York
 check "分数 70-84" "$([[ $SCORE -ge 70 && $SCORE -lt 85 ]] && echo yes)" yes
 check "评级良好" "$GRADE" 良好
 
-echo "⑤ 修好时区后应加满 7 分"
+echo "⑤ 修好时区后应加满 5 分"
 before=$SCORE; SYS_TZ=America/New_York; compute_score
-check "分数 +7" "$SCORE" "$((before + 7))"
+check "分数 +5" "$SCORE" "$((before + 5))"
 check "时区不再可修" "$FIXABLE_TZ" ""
 
 echo "⑥ PAC 分流 + 多层代理 + 情报冲突 => 各自扣分并给建议"
@@ -67,10 +70,10 @@ check "点名 PAC" "$(echo "$ISSUES" | grep -c 'PAC 自动分流')" 1
 check "点名多层代理" "$(echo "$ISSUES" | grep -c '链路上还有一层代理')" 1
 check "点名情报冲突" "$(echo "$ISSUES" | grep -c '情报库对该出口判定不一致')" 1
 
-echo "⑦ DNS 被污染 => 扣满 9 分"
+echo "⑦ DNS 被污染 => 扣满 6 分"
 base_signals; compute_score; full=$SCORE
 DNS_VERDICT="被污染(指向私有地址)"; DNS_RESULT=127.0.0.1; compute_score
-check "扣 9 分" "$SCORE" "$((full - 9))"
+check "扣 6 分" "$SCORE" "$((full - 6))"
 
 echo "⑧ 已配中转时 API 直连不通只扣一半"
 base_signals; API_CODE=000; CLAUDE_BASE="https://relay.example.com"; compute_score
@@ -81,6 +84,17 @@ check "无中转则明确报连不上" "$(echo "$ISSUES" | grep -c '连不上(�
 echo "⑨ 情报接口全挂(国家未知) => 不至于判死"
 base_signals; COUNTRY=""; COUNTRY2=""; CF_LOC=""; CF_IP=""; HOSTING=-1; compute_score
 check "仍有分" "$([[ $SCORE -gt 40 ]] && echo yes)" yes
+
+echo "⑩ WebRTC 暴露了另一个出口 => 扣满 6 分并给建议"
+base_signals; compute_score; full2=$SCORE
+BR_RTC=8.8.8.8; compute_score
+check "扣 6 分" "$SCORE" "$((full2 - 6))"
+check "点名 UDP 绕过代理" "$(echo "$ISSUES" | grep -c 'UDP 绕过了代理')" 1
+
+echo "⑪ 浏览器信号没采集到 => 给部分分而不是判零"
+base_signals; BR_OK=0; compute_score
+check "浏览器组拿到 9/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 9
+check "不产生误报问题" "$(echo "$ISSUES" | grep -c 浏览器)" 0
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }
