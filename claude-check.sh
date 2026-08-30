@@ -471,8 +471,55 @@ active_service() {
     /^Hardware Port:/{p=substr($0,16)} /^Device:/{if($2==d){print p; exit}}'
 }
 
-# 生成并打开 DoH 描述文件。在国内直接把 DNS 改成 1.1.1.1 会被投毒污染，
-# 明文 DNS 换谁都一样，只有加密 DNS(DoH) 才真正解决泄漏，所以修复走 mobileconfig。
+# 解析 claude.ai 看某台 DNS 是否可信(能拿到 Anthropic/Cloudflare 真实地址 = 没被投毒)
+dns_trusted() {
+  local srv="$1" ip
+  ip=$(dig +short +time=3 +tries=1 claude.ai "@$srv" 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
+  [[ -z "$ip" ]] && ip=$(nslookup claude.ai "$srv" 2>/dev/null | awk '/^Address: /{print $2}' | tail -1)
+  case "$ip" in
+    160.79.10[45].*|104.*|172.6[4-9].*|162.15[89].*|188.114.*|141.101.*) echo "$ip"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# DNS 泄漏修复: 换成境外公共 DNS。
+# 先验证候选 DNS 能不能正确解析 claude.ai —— 在国内明文 DNS 可能被投毒，
+# 盲目改过去会把能用的环境改坏，所以验证通过才动手。
+fix_dns_servers() {
+  local svc="$1" srv ok="" ips=""
+  for srv in 1.1.1.1 8.8.8.8 9.9.9.9; do
+    if ip=$(dns_trusted "$srv"); then
+      echo "  ✓ $srv 解析 claude.ai → $ip (可信)"
+      ok="$ok $srv"
+    else
+      echo "  ✗ $srv 解析异常，跳过"
+    fi
+  done
+  ok="${ok# }"
+  if [[ -z "$ok" ]]; then
+    echo "  ⚠️  候选 DNS 全部解析异常(可能被投毒)，改用加密 DNS 方案"
+    fix_dns_doh
+    return 1
+  fi
+  # 备份原设置，方便撤销
+  local bak="$DATA_DIR/dns_backup"
+  networksetup -getdnsservers "$svc" 2>/dev/null | tr '\n' ' ' >"$bak"
+  if sudo -n /usr/sbin/networksetup -setdnsservers "$svc" $ok >/dev/null 2>&1; then
+    dscacheutil -flushcache 2>/dev/null
+    echo "  ✅ 已把 $svc 的 DNS 改为: $ok"
+    echo "     撤销: sudo networksetup -setdnsservers \"$svc\" empty   (原值见 $bak)"
+    log "fix: DNS $svc -> $ok"
+    return 0
+  fi
+  echo "  ⚠️  改 DNS 需要授权，先运行一次: sudo bash enable-auto-timezone.sh"
+  NEED_SUDO=1
+  return 1
+}
+
+# 备选方案: 加密 DNS(DoH) 描述文件。
+# 注意 macOS 把 DNS Settings 实现成 Network Extension，机器上跑着 VPN/TUN 类代理
+# (FlClash / Surge / Clash Verge 等)时安装会失败，报 "The VPN service could not be created"。
+# 所以它只作为公共 DNS 全被投毒时的兜底，不再当作首选。
 fix_dns_doh() {
   local f="$DATA_DIR/Cloudflare-DoH.mobileconfig"
   local u1 u2; u1=$(uuidgen); u2=$(uuidgen)
@@ -496,12 +543,13 @@ fix_dns_doh() {
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>$u2</string>
   <key>PayloadVersion</key><integer>1</integer>
+  <key>PayloadRemovalDisallowed</key><false/>
 </dict></plist>
 PLIST
+  echo "  📄 已生成 DoH 描述文件: $f"
+  echo "     需到 系统设置 → 通用 → 设备管理 双击安装(macOS 不允许程序自动安装)"
+  echo "     若报 'VPN service could not be created'，是代理 App 的网络扩展占用，先退出代理再装"
   open "$f" 2>/dev/null
-  open "x-apple.systempreferences:com.apple.preference.security?Profiles" 2>/dev/null
-  echo "  📄 已生成 DoH 描述文件并打开系统设置，点「安装」即可(撤销=在描述文件里删除)"
-  echo "     $f"
 }
 
 apply_fixes() {
@@ -532,10 +580,11 @@ apply_fixes() {
     fi
   fi
 
-  # 3. DNS 泄漏 -> 上加密 DNS
+  # 3. DNS 泄漏 -> 换成验证过的境外 DNS(投毒时才退回 DoH)
   if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then
     echo "→ 修复 DNS 泄漏 (当前 $DNS_SCOPE)"
-    fix_dns_doh; done_any=1
+    if [[ -n "$svc" ]]; then fix_dns_servers "$svc"; else echo "  ⚠️  找不到活跃网络服务"; fi
+    done_any=1
   fi
 
   # 4. 系统区域(会影响日期格式显示，需显式 --fix-locale)
@@ -645,6 +694,10 @@ main() {
       notify "修复需要授权" "先运行一次 sudo bash enable-auto-timezone.sh"
     elif [[ $SCORE -gt $before ]]; then
       notify "Claude 环境已修复" "${before} → ${SCORE} 分"
+    else
+      # 分数没变不代表没干活(DoH 要用户自己点安装)，也得给个回音，
+      # 否则从菜单点"一键修复"看着像什么都没发生。
+      notify "体检完成" "${SCORE} 分$( [[ -n "$(fixable_list)" ]] && echo "，剩余待处理: $(fixable_list)" )"
     fi
   fi
   write_cstatus
