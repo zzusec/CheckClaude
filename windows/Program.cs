@@ -1,9 +1,9 @@
 // CheckClaude for Windows —— 检查这台机器适不适合跑 Claude，能修的直接修。
-// 与 macOS 版同一套评分模型(20 项加权信号，合计 100)，这里是 .NET Framework 4.8 实现：
-// 用 csc.exe 编译，产物是单个 exe，不需要装任何运行时。
+// 与 macOS 版同一套评分模型（26 项加权信号，合计 100），这里是 .NET Framework 4.8 实现：
+// 用系统自带 csc.exe 编译，产物是单个 exe，不需要安装第三方运行时。
 //
-// 浏览器 4 项(WebRTC/Intl/渲染)在 Windows 版按中性 70% 计分——csc 单文件带不了 WebView2 依赖，
-// 和命令行单跑 macOS 版是同一口径，不假装测过。
+// 浏览器 7 项由 BrowserBridge 调起系统默认浏览器采集；命令行单跑时没有浏览器上下文，
+// 与 macOS 命令行模式保持同一口径，按中性分计入。
 
 using System;
 using System.Collections.Generic;
@@ -196,6 +196,8 @@ namespace CheckClaude
         public string VmHost; public int IpChanges;
         public string ClaudeVer, ClaudeBase;
         public string ActiveNic;
+        // 浏览器指纹(由 BrowserBridge 采集后写文件，这里读回来)
+        public bool BrOk; public string BrSource, BrTz, BrLangs, BrLocale, BrRtc, BrWebgl, BrFonts, BrChPlat, BrAccept;
     }
 
     static class Collector
@@ -225,10 +227,11 @@ namespace CheckClaude
         public static bool IsUnsupported(string cc) { return cc != null && UnsupportedCc.Contains(cc.ToUpperInvariant()); }
         public static bool IsSupported(string cc) { return cc != null && SupportedCc.Contains(cc.ToUpperInvariant()); }
 
-        public static Facts Collect()
+        // 定时器只跑这组轻量探测。完整 Claude 体检只在首次启动、手动点击、
+        // 出口变化或一致性变化时运行，避免每分钟请求 Anthropic。
+        public static Facts CollectExit()
         {
             var f = new Facts();
-            // 三路出口并行拿，串行会拖到半分钟以上
             var tCn = Task.Run(() => Net.FirstIp(
                 "http://members.3322.org/dyndns/getip",
                 "https://whois.pconline.com.cn/ipJson.jsp?json=true",
@@ -238,17 +241,28 @@ namespace CheckClaude
             var tGfw = Task.Run(() => Net.FirstIp(
                 "https://www.cloudflare.com/cdn-cgi/trace", "https://api.ip.sb/ip", "https://api.myip.com"));
             var tGoogle = Task.Run(() => Net.Status("https://www.google.com/generate_204"));
+            Task.WaitAll(new Task[] { tCn, tIntl, tGfw, tGoogle }, 22000);
+
+            f.CnIp = tCn.Result;
+            f.IntlIp = tIntl.Result;
+            f.GfwIp = tGfw.Result;
+            int gcode = tGoogle.Result;
+            f.GoogleReachable = gcode == 204 || gcode == 200;
+            f.Consistent = !string.IsNullOrEmpty(f.CnIp) && f.CnIp == f.IntlIp && f.IntlIp == f.GfwIp;
+            f.ProbeIp = f.GfwIp ?? f.IntlIp;
+            return f;
+        }
+
+        public static Facts Collect()
+        {
+            var f = CollectExit();
             var tCf = Task.Run(() => Net.Get("https://www.cloudflare.com/cdn-cgi/trace"));
             var tApi = Task.Run(() => Net.Status("https://api.anthropic.com/v1/messages", "POST", "{}"));
             var tWeb = Task.Run(() => Net.Status("https://claude.ai/robots.txt"));
             var tSite = Task.Run(() => Net.Status("https://www.anthropic.com/robots.txt"));
             var tV6 = Task.Run(() => Ipv6Exit());
-            Task.WaitAll(new Task[] { tCn, tIntl, tGfw, tGoogle, tCf, tApi, tWeb, tSite, tV6 }, 22000);
+            Task.WaitAll(new Task[] { tCf, tApi, tWeb, tSite, tV6 }, 22000);
 
-            f.CnIp = tCn.Result; f.IntlIp = tIntl.Result; f.GfwIp = tGfw.Result;
-            int gcode = tGoogle.Result; f.GoogleReachable = (gcode == 204 || gcode == 200);
-            f.Consistent = !string.IsNullOrEmpty(f.CnIp) && f.CnIp == f.IntlIp && f.IntlIp == f.GfwIp;
-            f.ProbeIp = f.GfwIp ?? f.IntlIp;
             f.ApiCode = tApi.Result; f.WebCode = tWeb.Result; f.SiteCode = tSite.Result;
             f.Ipv6 = tV6.Result;
 
@@ -295,6 +309,7 @@ namespace CheckClaude
             CollectDns(f);
             CollectSystem(f);
             CollectStability(f);
+            CollectBrowser(f);
             CollectClaude(f);
             return f;
         }
@@ -453,6 +468,35 @@ namespace CheckClaude
                 }
             }
             catch { }
+        }
+
+        // 浏览器指纹: 1 小时内采集的才算数
+        static void CollectBrowser(Facts f)
+        {
+            f.BrOk = false;
+            var path = Path.Combine(Paths.Dir, "browser_signals");
+            if (!File.Exists(path)) return;
+            if ((DateTime.Now - File.GetLastWriteTime(path)).TotalHours > 1) return;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var i = line.IndexOf('=');
+                if (i <= 0) continue;
+                var k = line.Substring(0, i); var v = line.Substring(i + 1);
+                switch (k)
+                {
+                    case "source": f.BrSource = v; break;
+                    case "tz": f.BrTz = v; break;
+                    case "languages": f.BrLangs = v; break;
+                    case "locale": f.BrLocale = v; break;
+                    case "rtc_srflx": f.BrRtc = v; break;
+                    case "webgl": f.BrWebgl = v; break;
+                    case "fonts": f.BrFonts = v; break;
+                    case "ch_platform": f.BrChPlat = v; break;
+                    case "uad_platform": if (string.IsNullOrEmpty(f.BrChPlat)) f.BrChPlat = v; break;
+                    case "accept_lang": f.BrAccept = v; break;
+                }
+            }
+            f.BrOk = !string.IsNullOrEmpty(f.BrTz);
         }
 
         static void CollectClaude(Facts f)
@@ -755,19 +799,84 @@ namespace CheckClaude
             else r.Sig("稳定", "运行容器", 3, 30, f.VmHost, "在物理机上登录和使用",
                 "运行在" + f.VmHost + "中，设备指纹异常是风控关注的信号", "尽量在物理机上使用 Claude");
 
-            // F. 浏览器画像 (15) —— Windows 版不带 WebView2 依赖，按中性 70% 计分，不假装测过
-            r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            r.Sig("浏览器", "浏览器时区", 3, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            // 1 分的项不值得因为"没测"就扣成 0/1，那看起来像 bug
-            r.Sig("浏览器", "Intl 区域设置", 1, 100, "未采集", null);
-            // 这两项要真实浏览器才拿得到(Windows 版暂无浏览器桥接)，按中性计分不误判
-            r.Sig("浏览器", "Client Hints", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            r.Sig("浏览器", "HTTP 语言首标", 1, 100, "未采集", null);
-            r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
+            // F. 浏览器画像 (17) —— 与 macOS 版同一套判定
+            if (!f.BrOk)
+            {
+                // 没采集到就按中性计分，不能因为"没测"判环境有问题，也不白送满分
+                r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "浏览器时区", 3, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "Intl 区域设置", 1, 100, "未采集", null);
+                r.Sig("浏览器", "Client Hints", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "HTTP 语言首标", 1, 100, "未采集", null);
+            }
+            else
+            {
+                bool real = f.BrSource == "browser";
+                string src = real ? "（真实浏览器）" : "";
+                // WebRTC 走 UDP，不经 HTTP 代理，能暴露代理没兜住的真实出口
+                if (string.IsNullOrEmpty(f.BrRtc))
+                    r.Sig("浏览器", "WebRTC 出口", 6, 100, "无泄漏（未拿到公网候选）", null);
+                else if (f.BrRtc.Contains(f.ProbeIp ?? "\u0000"))
+                    r.Sig("浏览器", "WebRTC 出口", 6, 100, f.BrRtc + " = 出口", null);
+                else
+                {
+                    var first = f.BrRtc.Split(',')[0];
+                    var cc = Net.Json(Net.Get("http://ip-api.com/json/" + first + "?fields=countryCode"), "countryCode");
+                    r.Sig("浏览器", "WebRTC 出口", 6, 0,
+                        f.BrRtc.Split(',').Length + " 个泄漏 · " + (cc ?? "?") + " ≠ " + f.Country,
+                        "代理开 TUN 模式接管 UDP，或在浏览器里禁用 WebRTC",
+                        "WebRTC 暴露了非代理出口(首个 " + first + (cc != null ? "，归属 " + cc : "") + ")，UDP 绕过了代理",
+                        "代理开 TUN 全局或浏览器禁用 WebRTC");
+                }
 
-            // 出口落在不服务地区是硬性阻断: 国内直连的画像其实很自洽(中文+国内IP+国内时区全一致)，
-            // 不能让这些一致性得分把它抬进"基本可用"
+                if (f.BrTz == f.SysTimezone || Tz.ToWindows(f.BrTz) == f.SysTimezone)
+                    r.Sig("浏览器", "浏览器时区", 3, 100, f.BrTz + src, null);
+                else
+                    r.Sig("浏览器", "浏览器时区", 3, 25, f.BrTz + " ≠ " + f.SysTimezone,
+                        "重启浏览器，让它重新读系统时区",
+                        "浏览器时区 " + f.BrTz + " 与系统时区不一致", "重启浏览器");
+
+                if (!string.IsNullOrEmpty(f.Country) && (f.BrLangs ?? "").StartsWith("zh")
+                    && !Collector.IsUnsupported(f.Country))
+                    r.Sig("浏览器", "浏览器语言", 2, 40, f.BrLangs + " vs " + f.Country,
+                        "把浏览器首选语言调成 en-US",
+                        "浏览器语言 " + f.BrLangs + " 与出口地区 " + f.Country + " 矛盾（网页端登录时直接可见）");
+                else r.Sig("浏览器", "浏览器语言", 2, 100, f.BrLangs ?? "?", null);
+
+                var rd = (f.BrWebgl ?? "");
+                if (!string.IsNullOrEmpty(f.BrFonts)) rd += " · " + f.BrFonts.Split(',').Length + " 中文字体";
+                r.Sig("浏览器", "渲染环境", 2, string.IsNullOrEmpty(f.BrWebgl) ? 50 : 100,
+                    string.IsNullOrEmpty(f.BrWebgl) ? "未取到 GPU 信息" : rd, "从托盘点「重新体检」重新采集");
+
+                if (string.IsNullOrEmpty(f.BrLocale) || string.IsNullOrEmpty(f.Country) || f.BrLocale.EndsWith("-" + f.Country))
+                    r.Sig("浏览器", "Intl 区域设置", 1, 100, f.BrLocale ?? "?", null);
+                else
+                    r.Sig("浏览器", "Intl 区域设置", 1, 50, f.BrLocale + " vs " + f.Country,
+                        "浏览器设置里把语言/区域调成与出口地区一致");
+
+                // Client Hints(Chromium 独有): 平台标识要和真实系统对得上
+                if (!real) r.Sig("浏览器", "Client Hints", 2, 70, "内置引擎未采集", null);
+                else if (string.IsNullOrEmpty(f.BrChPlat)) r.Sig("浏览器", "Client Hints", 2, 100, "Safari/Firefox 不提供", null);
+                else if (f.BrChPlat.IndexOf("Windows", StringComparison.OrdinalIgnoreCase) >= 0)
+                    r.Sig("浏览器", "Client Hints", 2, 100, f.BrChPlat, null);
+                else
+                    r.Sig("浏览器", "Client Hints", 2, 0, f.BrChPlat + " ≠ Windows",
+                        "关掉浏览器里改 UA 的插件，用原生浏览器打开 claude.ai",
+                        "浏览器上报的平台 " + f.BrChPlat + " 与真实系统不符，UA 被改过或运行在异常容器中");
+
+                if (!real || string.IsNullOrEmpty(f.BrAccept))
+                    r.Sig("浏览器", "HTTP 语言首标", 1, 100, f.BrAccept ?? "未采集", null);
+                else if (!string.IsNullOrEmpty(f.Country) && f.BrAccept.StartsWith("zh")
+                         && !new[] { "CN", "HK", "TW", "MO", "SG" }.Contains(f.Country.ToUpperInvariant()))
+                    r.Sig("浏览器", "HTTP 语言首标", 1, 0, f.BrAccept + " vs " + f.Country,
+                        "浏览器设置 → 语言，把 English (United States) 拖到第一位",
+                        "请求头 Accept-Language: " + f.BrAccept + " 与出口 " + f.Country + " 矛盾，服务端第一眼就能看到");
+                else r.Sig("浏览器", "HTTP 语言首标", 1, 100,
+                        f.BrAccept.Length > 24 ? f.BrAccept.Substring(0, 24) : f.BrAccept, null);
+            }
+
             if (Collector.IsUnsupported(f.Country))
             { r.Grade = "高风险"; r.Verdict = Collector.RegionNote(f.Country); }
             else if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
@@ -936,7 +1045,39 @@ namespace CheckClaude
         Report report;
         System.Windows.Forms.Timer scanTimer, updTimer;
         string lastExitIp = "", notifiedVersion = "";
-        bool busy;
+        bool busy, probeBusy;
+        BrowserBridge bridge;
+        // 检测间隔存注册表，重启后保持
+        int ScanInterval
+        {
+            get
+            {
+                try
+                {
+                    using (var k = Registry.CurrentUser.OpenSubKey(@"Software\CheckClaude"))
+                    {
+                        var v = k == null ? null : k.GetValue("scanInterval");
+                        if (v != null)
+                        {
+                            int seconds = Convert.ToInt32(v);
+                            if (seconds >= 30 && seconds <= 86400) return seconds;
+                        }
+                    }
+                }
+                catch { }
+                return 60;
+            }
+            set
+            {
+                try
+                {
+                    using (var k = Registry.CurrentUser.CreateSubKey(@"Software\CheckClaude"))
+                        if (k != null) k.SetValue("scanInterval", value);
+                }
+                catch { }
+            }
+        }
+        volatile bool phase;   // true = 正在检测(内部分两步，不暴露给用户)
 
         public TrayApp()
         {
@@ -946,8 +1087,8 @@ namespace CheckClaude
             icon.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left) icon.ContextMenuStrip.Show(Cursor.Position); };
             BuildMenu();
 
-            scanTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };     // 每 5 分钟一次出口检测
-            scanTimer.Tick += (s, e) => RunCheck(false);
+            scanTimer = new System.Windows.Forms.Timer { Interval = ScanInterval * 1000 };
+            scanTimer.Tick += (s, e) => RunExitProbe();
             scanTimer.Start();
 
             updTimer = new System.Windows.Forms.Timer { Interval = 6 * 3600 * 1000 };    // 每 6 小时查一次新版本
@@ -983,20 +1124,78 @@ namespace CheckClaude
             return Color.FromArgb(255, 59, 48);
         }
 
-        void RunCheck(bool manual)
+        void RunExitProbe()
         {
-            if (busy) return;
+            if (busy || phase || probeBusy) return;
+            probeBusy = true;
+            Task.Run(() =>
+            {
+                Facts latest = null;
+                try { latest = Collector.CollectExit(); }
+                catch (Exception e) { Paths.Write("出口探测异常: " + e.Message); }
+                Sync(() =>
+                {
+                    probeBusy = false;
+                    if (latest == null || string.IsNullOrEmpty(latest.ProbeIp)) return;
+                    if (report == null)
+                    {
+                        RunCheck(false, true);
+                        return;
+                    }
+                    bool ipChanged = !string.IsNullOrEmpty(lastExitIp) && latest.ProbeIp != lastExitIp;
+                    bool consistencyChanged = report.F.Consistent != latest.Consistent;
+                    if (ipChanged)
+                    {
+                        icon.ShowBalloonTip(6000, "CheckClaude 出口 IP 变化",
+                            lastExitIp + " → " + latest.ProbeIp + "，正在重新体检", ToolTipIcon.Warning);
+                        RunCheck(false, true);
+                    }
+                    else if (consistencyChanged)
+                    {
+                        icon.ShowBalloonTip(6000,
+                            latest.Consistent ? "CheckClaude 出口已恢复正常" : "CheckClaude 出口 IP 异常",
+                            latest.Consistent ? "国内、国外、谷歌三路出口已恢复一致" : "三路出口不一致，正在重新体检",
+                            latest.Consistent ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                        RunCheck(false, false);
+                    }
+                    else
+                    {
+                        // 完整体检无需重跑，但菜单里的三路明细与 Google 可达性要保持最新。
+                        report.F.CnIp = latest.CnIp;
+                        report.F.IntlIp = latest.IntlIp;
+                        report.F.GfwIp = latest.GfwIp;
+                        report.F.ProbeIp = latest.ProbeIp;
+                        report.F.GoogleReachable = latest.GoogleReachable;
+                        report.F.Consistent = latest.Consistent;
+                        BuildMenu();
+                    }
+                });
+            });
+        }
+
+        // 体检两步: ① 系统检测(本地信号) ② 浏览器指纹采集(打开浏览器，采完自动关)
+        // 对用户是一次点击，内部分几步不暴露。
+        void RunCheck(bool manual, bool withBrowser = true)
+        {
+            if (busy || phase) return;
             busy = true;
+            phase = true;
             Task.Run(() =>
             {
                 Facts f = null;
+                bool browserRequested = withBrowser;
                 try { f = Collector.Collect(); } catch (Exception e) { Paths.Write("体检异常: " + e.Message); }
                 if (f != null)
                 {
-                    // 出口 IP 变了才记一笔，"出口稳定性"就是数这些行
+                    // 出口 IP 变了才记一笔，"出口稳定性"就是数这些行；同时重采浏览器信号，
+                    // 避免浏览器画像还挂着上一个出口的数据。
                     var cur = f.ProbeIp ?? "none";
-                    if (!string.IsNullOrEmpty(lastExitIp) && lastExitIp != cur)
+                    bool exitChanged = !string.IsNullOrEmpty(lastExitIp) && lastExitIp != cur;
+                    if (exitChanged)
+                    {
                         Paths.Write("出口 IP 变化: " + lastExitIp + " -> " + cur);
+                        browserRequested = true;
+                    }
                     lastExitIp = cur;
                     report = Report.Build(f);
                     Paths.Write(string.Format("体检: {0}/100 {1} country={2} api={3}",
@@ -1004,9 +1203,42 @@ namespace CheckClaude
                 }
                 busy = false;
                 Sync(BuildMenu);
-                if (manual && report != null)
-                    Sync(() => icon.ShowBalloonTip(4000, "CheckClaude",
-                        report.Score + " 分 · " + report.Grade, ToolTipIcon.Info));
+
+                // 第二步：手动完整体检、首次启动或出口变化时采集真实浏览器指纹。
+                // 最终分数通知要等浏览器结果写回并重新评分后再显示。
+                bool shouldStartBrowser = browserRequested && bridge == null;
+                if (shouldStartBrowser)
+                {
+                    Sync(() =>
+                    {
+                        bridge = new BrowserBridge(Path.Combine(Paths.Dir, "browser_signals"), ok =>
+                        {
+                            bridge = null;
+                            phase = false;
+                            if (ok)
+                            {
+                                RunCheck(manual, false);
+                            }
+                            else
+                            {
+                                Sync(BuildMenu);
+                                if (manual && report != null)
+                                    Sync(() => icon.ShowBalloonTip(4000, "CheckClaude",
+                                        report.Score + " 分 · " + report.Grade + "（浏览器信号未更新）",
+                                        ToolTipIcon.Warning));
+                            }
+                        });
+                        bridge.Start();
+                    });
+                }
+                else
+                {
+                    phase = false;
+                    Sync(BuildMenu);
+                    if (manual && report != null)
+                        Sync(() => icon.ShowBalloonTip(4000, "CheckClaude",
+                            report.Score + " 分 · " + report.Grade, ToolTipIcon.Info));
+                }
             });
         }
 
@@ -1061,7 +1293,8 @@ namespace CheckClaude
                     (string.IsNullOrEmpty(f.ClaudeBase) ? "官方" : f.ClaudeBase)));
                 m.Items.Add(head);
 
-                m.Items.Add(Item("重新体检", (s, e) => RunCheck(true)));
+                if (phase) m.Items.Add(Item("正在检测…"));
+                else m.Items.Add(Item("重新体检", (s, e) => RunCheck(true)));
                 // 始终摆在这儿: 按钮凭空消失会让人以为功能没了，置灰说明比隐藏清楚
                 if (!string.IsNullOrEmpty(report.FixList))
                     m.Items.Add(Item("⚡ 一键修复：" + report.FixList, (s, e) => DoFix()));
@@ -1087,11 +1320,29 @@ namespace CheckClaude
                 }
 
                 m.Items.Add(new ToolStripSeparator());
-                m.Items.Add(Item("出口 IP: " + (f.ProbeIp ?? "?") + (f.Consistent ? "（三路一致）" : "（三路不一致）")));
+                // 三路视角明细，与 macOS 版菜单对齐
+                m.Items.Add(Item("国内视角: " + (f.CnIp ?? "?")));
+                m.Items.Add(Item("国外视角: " + (f.IntlIp ?? "?")));
+                m.Items.Add(Item("谷歌/被封: " + (f.GfwIp ?? "?") + "  (Google: " + (f.GoogleReachable ? "可达" : "不可达") + ")"));
+                m.Items.Add(new ToolStripSeparator());
+                m.Items.Add(Item("出口侧时区: " + (f.IpTimezone ?? "?")));
                 m.Items.Add(Item("系统时区: " + f.SysTimezone));
+                // 时间戳跟着系统时区走，而系统时区跟着出口走
+                m.Items.Add(Item((f.Country == "CN" ? "本地时间: " : "海外时间: ") + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")));
             }
 
             m.Items.Add(new ToolStripSeparator());
+            m.Items.Add(Item("立即检测", (s, e) => RunCheck(true, false)));
+            var iv = new ToolStripMenuItem("检测间隔");
+            foreach (var opt in new[] { new { L = "1 分钟", V = 60 }, new { L = "2 分钟", V = 120 },
+                                        new { L = "5 分钟", V = 300 }, new { L = "10 分钟", V = 600 } })
+            {
+                var it = new ToolStripMenuItem(opt.L) { Checked = ScanInterval == opt.V };
+                int v = opt.V;
+                it.Click += (s, e) => { ScanInterval = v; scanTimer.Interval = v * 1000; BuildMenu(); };
+                iv.DropDownItems.Add(it);
+            }
+            m.Items.Add(iv);
             m.Items.Add(Item("打开日志", (s, e) => { try { Process.Start("notepad.exe", Paths.Log); } catch { } }));
             var auto = new ToolStripMenuItem("开机自启") { Checked = AutoStart.Enabled, CheckOnClick = true };
             auto.Click += (s, e) => { AutoStart.Toggle(); BuildMenu(); };
