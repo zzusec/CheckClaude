@@ -1061,8 +1061,12 @@ namespace CheckClaude
                 m.Items.Add(head);
 
                 m.Items.Add(Item("重新体检", (s, e) => RunCheck(true)));
+                // 始终摆在这儿: 按钮凭空消失会让人以为功能没了，置灰说明比隐藏清楚
                 if (!string.IsNullOrEmpty(report.FixList))
                     m.Items.Add(Item("⚡ 一键修复：" + report.FixList, (s, e) => DoFix()));
+                else
+                    m.Items.Add(Item(score >= 100 ? "⚡ 一键修复（已满分，无需修复）"
+                                                  : "⚡ 一键修复（剩余项需手动处理）"));
 
                 m.Items.Add(new ToolStripSeparator());
                 m.Items.Add(Item("出口 IP: " + (f.ProbeIp ?? "?") + (f.Consistent ? "（三路一致）" : "（三路不一致）")));

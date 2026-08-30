@@ -163,8 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             menu.addItem(action("重新体检", #selector(runClaudeCheck)))
         }
+        // 始终摆在这儿: 按钮凭空消失会让人以为功能没了，置灰说明比隐藏清楚
         if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
             menu.addItem(action("⚡ 一键修复：\(list)", #selector(runClaudeFix)))
+        } else if !c.isEmpty {
+            // score 只存在于 claudeMenuItem() 内部，这里自己从快照读
+            let sc = Int(c["score"] ?? "") ?? -1
+            menu.addItem(disabled(sc >= 100 ? "⚡ 一键修复（已满分，无需修复）"
+                                            : "⚡ 一键修复（剩余项需手动处理）"))
         }
         menu.addItem(.separator())
         menu.addItem(action("立即检测", #selector(runCheck)))
