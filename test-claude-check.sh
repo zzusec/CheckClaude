@@ -23,14 +23,15 @@ base_signals() {
   CLAUDE_BASE=""; CLAUDE_VER=test
   IP_CHANGES=0; VM_HOST=物理机
   BR_OK=1; BR_TZ=America/Los_Angeles; BR_LANGS=en-US,en; BR_LOCALE=en-US
-  BR_RTC=1.2.3.4; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"
+  BR_RTC=1.2.3.4; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"; BR_LOCALE=en-US
+  SITE_CODE=200; IPV6=""; IPV6_CC=""; SYS_LANGS=en-US
 }
 
 echo "① 完美环境 => 100 分且无问题"
 base_signals; compute_score
 check "满分" "$SCORE" 100
 check "无问题" "$ISSUES" ""
-check "20 项信号" "${#SIGNALS[@]}" 20
+check "24 项信号" "${#SIGNALS[@]}" 24
 
 echo "② 权重表合计必须正好 100(防止加信号时算错总分)"
 total=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r _ _ w _ _ <<<"$r"; total=$((total+w)); done
@@ -51,7 +52,7 @@ echo "④ 典型代理用户(美国机房/时区没跟上/中文区域/DNS走国
 base_signals
 HOSTING=1; SYS_TZ=Asia/Shanghai; GFW_TZ=America/New_York
 SYS_LOCALE=zh_CN; SYS_LANG=zh; LOCALE_CC=CN
-DNS_SCOPE="国内公共DNS(223.5.5.5)"
+DNS_SCOPE="国内公共DNS(223.5.5.5)"; IPV6="2408:8207::1"; IPV6_CC=CN
 compute_score
 check "标记时区可修" "$FIXABLE_TZ" America/New_York
 check "分数 70-84" "$([[ $SCORE -ge 70 && $SCORE -lt 85 ]] && echo yes)" yes
@@ -93,7 +94,7 @@ check "点名 UDP 绕过代理" "$(echo "$ISSUES" | grep -c 'UDP 绕过了代理
 
 echo "⑪ 浏览器信号没采集到 => 给部分分而不是判零"
 base_signals; BR_OK=0; compute_score
-check "浏览器组拿到 9/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 9
+check "浏览器组拿到 8/15" "$(t=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r g _ _ p _ <<<"$r"; [[ $g == 浏览器 ]] && t=$((t+p)); done; echo $t)" 8
 check "不产生误报问题" "$(echo "$ISSUES" | grep -c 浏览器)" 0
 
 echo "⑫ TUN 全局下 DNS 走隧道，不该按泄漏扣满分"
@@ -103,6 +104,14 @@ check "TUN 下拿 2/4" "$tun_dns" 2
 base_signals; DNS_SCOPE="国内公共DNS(223.5.5.5)"; PROXY_MODE="直连"; compute_score
 plain_dns=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r g l _ p _ <<<"$r"; [[ $l == "DNS 出口" ]] && echo $p; done)
 check "非 TUN 下扣光" "$plain_dns" 0
+
+echo "⑬ IPv6 出口与 IPv4 不同地区 => 扣满 3 分并点名"
+base_signals; compute_score; f6=$SCORE
+IPV6="2408:8207::1"; IPV6_CC=CN; compute_score
+check "扣 3 分" "$SCORE" "$((f6 - 3))"
+check "点名 IPv6 暴露" "$(echo "$ISSUES" | grep -c '代理没接管 IPv6')" 1
+base_signals; IPV6="2606:4700::1"; IPV6_CC=US; compute_score
+check "同地区不扣分" "$SCORE" "$f6"
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }

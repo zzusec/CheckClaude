@@ -96,6 +96,8 @@ fetch_all() {
   # 测 robots.txt 而不是主页: 主页对裸 curl 一律返 403(Cloudflare bot 挑战)，带浏览器 UA 也一样，
   # 那是反爬不是地区拦截，拿它判可达性会稳定误报。静态资源不触发挑战，能真实反映地区可达。
   ( curl -s -m 10 -o /dev/null -w '%{http_code}' https://claude.ai/robots.txt >"$TMP/webcode" 2>/dev/null ) &
+  ( curl -s -m 10 -o /dev/null -w '%{http_code}' https://www.anthropic.com/robots.txt >"$TMP/sitecode" 2>/dev/null ) &
+  ( ip_v6 >"$TMP/ipv6" 2>/dev/null ) &
   wait
 }
 
@@ -125,6 +127,10 @@ parse_net() {
   fi
   API_CODE=$(cat "$TMP/apicode" 2>/dev/null); API_CODE="${API_CODE:-000}"
   WEB_CODE=$(cat "$TMP/webcode" 2>/dev/null); WEB_CODE="${WEB_CODE:-000}"
+  SITE_CODE=$(cat "$TMP/sitecode" 2>/dev/null); SITE_CODE="${SITE_CODE:-000}"
+  IPV6=$(cat "$TMP/ipv6" 2>/dev/null | tr -d '[:space:]')
+  IPV6_CC=""
+  [[ -n "$IPV6" ]] && IPV6_CC=$(jget <($CURL "http://ip-api.com/json/${IPV6}?fields=status,countryCode") countryCode 2>/dev/null)
   API_REGION_BLOCK=0
   grep -qi 'unsupported_country\|not available in your' "$TMP/apibody" 2>/dev/null && API_REGION_BLOCK=1
 }
@@ -250,15 +256,15 @@ compute_score() {
 
   # ── A. 出口地区与服务可用 (35) ──
   if [[ -z "$COUNTRY" ]]; then
-    sig 出口 "出口国家" 18 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
+    sig 出口 "出口国家" 15 50 "未知" "出口 IP 归属地未知(IP 情报接口不可达)" "检查网络后重新体检"
   elif in_list "$COUNTRY" "$UNSUPPORTED"; then
-    sig 出口 "出口国家" 18 0 "$COUNTRY 不支持" \
+    sig 出口 "出口国家" 15 0 "$COUNTRY 不支持" \
       "出口国家 ${COUNTRY} 不在 Anthropic 服务范围，登录/订阅/API 均有封号风险" \
       "切到美国/日本/新加坡等支持地区节点，并长期固定，不要频繁换国家"
   elif in_list "$COUNTRY" "$SUPPORTED"; then
-    sig 出口 "出口国家" 18 100 "$COUNTRY ${CITY:-}"
+    sig 出口 "出口国家" 15 100 "$COUNTRY ${CITY:-}"
   else
-    sig 出口 "出口国家" 18 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
+    sig 出口 "出口国家" 15 66 "$COUNTRY 支持未知" "出口国家 ${COUNTRY} 支持情况未知" "建议改用 US/JP/SG 等已知支持地区节点"
   fi
 
   if [[ "$API_CODE" == "401" || "$API_CODE" == "400" ]]; then
@@ -277,11 +283,20 @@ compute_score() {
   fi
 
   case "$WEB_CODE" in
-    200|301|302|307) sig 出口 "claude.ai 可达" 4 100 "HTTP $WEB_CODE" ;;
-    403)             sig 出口 "claude.ai 可达" 4 20 "HTTP 403 被拦" \
+    200|301|302|307) sig 出口 "claude.ai 可达" 2 100 "HTTP $WEB_CODE" ;;
+    403)             sig 出口 "claude.ai 可达" 2 20 "HTTP 403 被拦" \
                        "claude.ai 返回 403(Cloudflare 地区拦截或风控挑战)" "换支持地区的干净节点，网页端登录前先确认能打开" ;;
-    000)             sig 出口 "claude.ai 可达" 4 0 "连不上" "claude.ai 连不上" "开启全局代理" ;;
-    *)               sig 出口 "claude.ai 可达" 4 60 "HTTP $WEB_CODE" ;;
+    000)             sig 出口 "claude.ai 可达" 2 0 "连不上" "claude.ai 连不上" "开启全局代理" ;;
+    *)               sig 出口 "claude.ai 可达" 2 60 "HTTP $WEB_CODE" ;;
+  esac
+
+  # anthropic.com 与 claude.ai 走的是不同的前端，分开测才能区分"整体被拦"和"单点异常"
+  case "$SITE_CODE" in
+    200|301|302|307) sig 出口 "anthropic.com 可达" 2 100 "HTTP $SITE_CODE" ;;
+    403)             sig 出口 "anthropic.com 可达" 2 20 "HTTP 403 被拦" \
+                       "anthropic.com 返回 403，官网侧也被拦" "换支持地区的干净节点" ;;
+    000)             sig 出口 "anthropic.com 可达" 2 0 "连不上" "anthropic.com 连不上" "开启全局代理" ;;
+    *)               sig 出口 "anthropic.com 可达" 2 60 "HTTP $SITE_CODE" ;;
   esac
 
   # 两家 IP 情报库对同一 IP 的判定是否一致
@@ -296,15 +311,28 @@ compute_score() {
     sig 出口 "多源情报一致" 3 50 "数据不足"
   fi
 
+  # IPv6 出口: 没有最省心，有就必须和 IPv4 出口同地区，否则等于开了个后门
+  if [[ -z "$IPV6" ]]; then
+    sig 出口 "IPv6 出口" 3 100 "无 IPv6(无泄漏面)"
+  elif [[ -z "$IPV6_CC" ]]; then
+    sig 出口 "IPv6 出口" 3 60 "${IPV6:0:20}… 归属未知" "IPv6 出口存在但查不到归属"
+  elif [[ "$IPV6_CC" == "$COUNTRY" ]]; then
+    sig 出口 "IPv6 出口" 3 100 "$IPV6_CC 与 IPv4 一致"
+  else
+    sig 出口 "IPv6 出口" 3 0 "$IPV6_CC ≠ $COUNTRY" \
+      "IPv6 出口在 ${IPV6_CC}，与 IPv4 出口 ${COUNTRY} 不一致 —— 代理没接管 IPv6，真实地区被暴露" \
+      "在代理里开启 IPv6 接管，或在系统网络设置里关掉 IPv6"
+  fi
+
   # ── B. 出口质量 (12) ──
   if [[ "$PROXY" == "1" ]]; then
-    sig 质量 "IP 类型" 6 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
+    sig 质量 "IP 类型" 5 25 "公开代理/VPN" "出口 IP 被标记为公开代理/VPN 出口，属高风控段" "换独享节点或住宅 IP，避免与大量用户共用出口"
   elif [[ "$HOSTING" == "1" ]]; then
-    sig 质量 "IP 类型" 6 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
+    sig 质量 "IP 类型" 5 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
   elif [[ "$HOSTING" == "0" ]]; then
-    sig 质量 "IP 类型" 6 100 "住宅"
+    sig 质量 "IP 类型" 5 100 "住宅"
   else
-    sig 质量 "IP 类型" 6 70 "未知"
+    sig 质量 "IP 类型" 5 70 "未知"
   fi
 
   # Cloudflare 边缘机房国家 vs IP 库国家: 不一致说明 IP 归属被"改过"或链路绕路
@@ -357,16 +385,16 @@ compute_score() {
   fi
 
   if [[ -z "$COUNTRY" || -z "$SYS_LOCALE" ]]; then
-    sig 画像 "系统区域匹配出口" 5 50 "数据不足"
+    sig 画像 "系统区域匹配出口" 4 50 "数据不足"
   elif [[ "$LOCALE_CC" == "$COUNTRY" ]]; then
-    sig 画像 "系统区域匹配出口" 5 100 "$SYS_LOCALE"
+    sig 画像 "系统区域匹配出口" 4 100 "$SYS_LOCALE"
   elif [[ "$SYS_LANG" == zh* ]]; then
-    sig 画像 "系统区域匹配出口" 5 50 "$SYS_LOCALE vs $COUNTRY" \
+    sig 画像 "系统区域匹配出口" 4 50 "$SYS_LOCALE vs $COUNTRY" \
       "系统语言中文 + 区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致(网页端登录会暴露矛盾)" \
       "仅用 Claude Code(CLI) 可忽略；常用网页端可把系统区域改成 ${COUNTRY}(不用改显示语言)"
     FIXABLE_LOCALE="$COUNTRY"
   else
-    sig 画像 "系统区域匹配出口" 5 70 "$SYS_LOCALE vs $COUNTRY" "系统区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致"
+    sig 画像 "系统区域匹配出口" 4 70 "$SYS_LOCALE vs $COUNTRY" "系统区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致"
     FIXABLE_LOCALE="$COUNTRY"
   fi
 
@@ -402,6 +430,25 @@ compute_score() {
   esac
 
   # ── E. 环境稳定性 / 运行容器 (10) ──
+  # 简体/繁体与出口地区的对应关系: 繁体主要用于 TW/HK/MO，简体用于 CN/SG
+  # 系统用繁体却从美国出口，或用简体却从台湾出口，都是地区画像里的矛盾信号
+  local variant=""
+  case "$SYS_LANGS" in
+    *zh-Hant*|*zh-TW*|*zh-HK*|*zh-MO*) variant="繁体" ;;
+    *zh-Hans*|*zh-CN*|*zh-SG*|zh*)     variant="简体" ;;
+  esac
+  if [[ -z "$variant" || -z "$COUNTRY" ]]; then
+    sig 画像 "语言变体一致" 2 100 "${variant:-非中文}"
+  elif [[ "$variant" == "繁体" ]] && in_list "$COUNTRY" "TW HK MO"; then
+    sig 画像 "语言变体一致" 2 100 "繁体 · $COUNTRY"
+  elif [[ "$variant" == "简体" ]] && in_list "$COUNTRY" "CN SG MY"; then
+    sig 画像 "语言变体一致" 2 100 "简体 · $COUNTRY"
+  else
+    sig 画像 "语言变体一致" 2 50 "$variant vs $COUNTRY" \
+      "系统用${variant}中文但出口在 ${COUNTRY}，语言变体与地区画像不对应" \
+      "仅用 CLI 可忽略；网页端登录前可把首选语言调成 en-US"
+  fi
+
   if [[ "$PAC_ON" == "1" ]]; then
     sig 稳定 "代理形态" 3 20 "$PROXY_MODE" \
       "启用了 PAC 自动分流，不同网站会走不同出口，账号画像不稳定" "关掉 PAC，改用 TUN 全局模式"
@@ -433,7 +480,9 @@ compute_score() {
     # 命令行单跑时没有 WebView，分数会比菜单栏里低几分，属预期。
     sig 浏览器 "WebRTC 出口" 6 70 "未采集"
     sig 浏览器 "浏览器时区" 4 70 "未采集"
-    sig 浏览器 "浏览器语言" 3 70 "未采集"
+    sig 浏览器 "浏览器语言" 2 70 "未采集"
+    # 1 分的项不值得因为"没测"就扣成 0/1，那看起来像 bug
+    sig 浏览器 "Intl 区域设置" 1 100 "未采集"
     sig 浏览器 "渲染环境" 2 70 "未采集"
   else
     # WebRTC 走 UDP，不经过 HTTP 代理，能暴露代理没兜住的真实出口
@@ -456,16 +505,29 @@ compute_score() {
 
     # 浏览器语言是网页端最直接的地区信号: 中文 + 国外出口是最常见的矛盾组合
     if [[ -n "$COUNTRY" && "$BR_LANGS" == zh* && ! " $UNSUPPORTED " == *" $COUNTRY "* ]]; then
-      sig 浏览器 "浏览器语言" 3 40 "$BR_LANGS vs $COUNTRY" \
+      sig 浏览器 "浏览器语言" 2 40 "$BR_LANGS vs $COUNTRY" \
         "浏览器语言 ${BR_LANGS} 与出口地区 ${COUNTRY} 矛盾(网页端登录时直接可见)" \
         "网页端登录前把浏览器首选语言调成 en-US"
     else
-      sig 浏览器 "浏览器语言" 3 100 "${BR_LANGS:-?}"
+      sig 浏览器 "浏览器语言" 2 100 "${BR_LANGS:-?}"
     fi
 
-    # 渲染环境: 拿到 WebGL 渲染器 = 真实 GPU 环境，拿不到多半在虚拟化/无头环境
+    # Intl 区域设置: 浏览器国际化配置与出口地区是否对应
+    if [[ -z "$BR_LOCALE" || -z "$COUNTRY" ]]; then
+      sig 浏览器 "Intl 区域设置" 1 100 "${BR_LOCALE:-?}"
+    elif [[ "$BR_LOCALE" == *"-$COUNTRY" ]]; then
+      sig 浏览器 "Intl 区域设置" 1 100 "$BR_LOCALE"
+    else
+      sig 浏览器 "Intl 区域设置" 1 50 "$BR_LOCALE vs $COUNTRY" \
+        "浏览器 Intl 区域 ${BR_LOCALE} 与出口 ${COUNTRY} 不对应"
+    fi
+
+    # 渲染环境: WebGL 渲染器 + 中文字体探测。字体是"国产终端弱信号"——
+    # 装着一堆中文字体本身不是问题(macOS 自带 PingFang)，只在拿不到 GPU 信息时才扣分
+    local render_desc="${BR_WEBGL:0:24}"
+    [[ -n "$BR_FONTS" ]] && render_desc+=" · $(echo "$BR_FONTS" | awk -F, '{print NF}') 中文字体"
     if [[ -n "$BR_WEBGL" ]]; then
-      sig 浏览器 "渲染环境" 2 100 "${BR_WEBGL:0:28}"
+      sig 浏览器 "渲染环境" 2 100 "$render_desc"
     else
       sig 浏览器 "渲染环境" 2 50 "未取到 GPU 信息"
     fi

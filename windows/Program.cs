@@ -186,7 +186,8 @@ namespace CheckClaude
         public int Hosting = -1;     // -1 未知 0 住宅 1 机房
         public bool Proxy;
         public string CfColo, CfLoc, CfIp;
-        public int ApiCode, WebCode;
+        public int ApiCode, WebCode, SiteCode;
+        public string Ipv6, Ipv6Cc;
         public string IpTimezone;                 // 出口 IP 对应的 IANA 时区
         public string SysTimezone { get { return TimeZoneInfo.Local.Id; } }
         public string Locale, LangName;
@@ -226,13 +227,16 @@ namespace CheckClaude
             var tCf = Task.Run(() => Net.Get("https://www.cloudflare.com/cdn-cgi/trace"));
             var tApi = Task.Run(() => Net.Status("https://api.anthropic.com/v1/messages", "POST", "{}"));
             var tWeb = Task.Run(() => Net.Status("https://claude.ai/robots.txt"));
-            Task.WaitAll(new Task[] { tCn, tIntl, tGfw, tGoogle, tCf, tApi, tWeb }, 20000);
+            var tSite = Task.Run(() => Net.Status("https://www.anthropic.com/robots.txt"));
+            var tV6 = Task.Run(() => Ipv6Exit());
+            Task.WaitAll(new Task[] { tCn, tIntl, tGfw, tGoogle, tCf, tApi, tWeb, tSite, tV6 }, 22000);
 
             f.CnIp = tCn.Result; f.IntlIp = tIntl.Result; f.GfwIp = tGfw.Result;
             int gcode = tGoogle.Result; f.GoogleReachable = (gcode == 204 || gcode == 200);
             f.Consistent = !string.IsNullOrEmpty(f.CnIp) && f.CnIp == f.IntlIp && f.IntlIp == f.GfwIp;
             f.ProbeIp = f.GfwIp ?? f.IntlIp;
-            f.ApiCode = tApi.Result; f.WebCode = tWeb.Result;
+            f.ApiCode = tApi.Result; f.WebCode = tWeb.Result; f.SiteCode = tSite.Result;
+            f.Ipv6 = tV6.Result;
 
             var trace = tCf.Result;
             if (trace != null)
@@ -260,6 +264,11 @@ namespace CheckClaude
                     f.Hosting = a.Contains("\"hosting\":true") ? 1 : 0;
                     f.Proxy = a.Contains("\"proxy\":true");
                 }
+                if (!string.IsNullOrEmpty(f.Ipv6))
+                {
+                    var v6 = Net.Get("http://ip-api.com/json/" + f.Ipv6 + "?fields=status,countryCode");
+                    f.Ipv6Cc = Net.Json(v6, "countryCode");
+                }
                 var b = t2.Result;
                 f.Country2 = Net.Json(b, "country");
                 if (f.Country == null && f.Country2 != null)
@@ -274,6 +283,19 @@ namespace CheckClaude
             CollectStability(f);
             CollectClaude(f);
             return f;
+        }
+
+        // 只认 IPv6-only 端点: api64 这类双栈域名在没有 IPv6 时会回退 IPv4，得出错误结论
+        static string Ipv6Exit()
+        {
+            foreach (var u in new[] { "https://ipv6.icanhazip.com", "https://v6.ident.me", "https://api6.ipify.org" })
+            {
+                var t = Net.Get(u, 6000);
+                if (t == null) continue;
+                t = t.Trim();
+                if (t.Contains(":") && t.Length > 5 && t.Length < 46) return t;
+            }
+            return null;
         }
 
         static void CollectDns(Facts f)
@@ -514,16 +536,16 @@ namespace CheckClaude
 
             // A. 出口地区与服务可用 (35)
             if (string.IsNullOrEmpty(f.Country))
-                r.Sig("出口", "出口国家", 18, 50, "未知", "换到 US / JP / SG 等支持地区的节点",
+                r.Sig("出口", "出口国家", 15, 50, "未知", "换到 US / JP / SG 等支持地区的节点",
                     "出口 IP 归属地未知(IP 情报接口不可达)", "检查网络后重新体检");
             else if (Collector.IsUnsupported(f.Country))
-                r.Sig("出口", "出口国家", 18, 0, f.Country + " 不支持", "换到 US / JP / SG 等支持地区的节点",
+                r.Sig("出口", "出口国家", 15, 0, f.Country + " 不支持", "换到 US / JP / SG 等支持地区的节点",
                     "出口国家 " + f.Country + " 不在 Anthropic 服务范围，登录/订阅/API 均有封号风险",
                     "切到美国/日本/新加坡等支持地区节点，并长期固定");
             else if (Collector.IsSupported(f.Country))
-                r.Sig("出口", "出口国家", 18, 100, f.Country + " " + (f.City ?? ""), null);
+                r.Sig("出口", "出口国家", 15, 100, f.Country + " " + (f.City ?? ""), null);
             else
-                r.Sig("出口", "出口国家", 18, 66, f.Country + " 支持未知", "换到 US / JP / SG 等已知支持地区的节点",
+                r.Sig("出口", "出口国家", 15, 66, f.Country + " 支持未知", "换到 US / JP / SG 等已知支持地区的节点",
                     "出口国家 " + f.Country + " 支持情况未知", "建议改用 US/JP/SG 等已知支持地区节点");
 
             if (f.ApiCode == 401 || f.ApiCode == 400)
@@ -542,14 +564,36 @@ namespace CheckClaude
                     "api.anthropic.com 返回异常状态 " + f.ApiCode, "稍后重试；持续异常则换节点");
 
             if (f.WebCode == 200 || f.WebCode == 301 || f.WebCode == 302 || f.WebCode == 307)
-                r.Sig("出口", "claude.ai 可达", 4, 100, "HTTP " + f.WebCode, null);
+                r.Sig("出口", "claude.ai 可达", 2, 100, "HTTP " + f.WebCode, null);
             else if (f.WebCode == 403)
-                r.Sig("出口", "claude.ai 可达", 4, 20, "HTTP 403 被拦", "换干净节点，确认浏览器能打开 claude.ai",
+                r.Sig("出口", "claude.ai 可达", 2, 20, "HTTP 403 被拦", "换干净节点，确认浏览器能打开 claude.ai",
                     "claude.ai 返回 403(地区拦截或风控挑战)", "换支持地区的干净节点");
             else if (f.WebCode == 0)
-                r.Sig("出口", "claude.ai 可达", 4, 0, "连不上", "开全局代理", "claude.ai 连不上", "开启全局代理");
+                r.Sig("出口", "claude.ai 可达", 2, 0, "连不上", "开全局代理", "claude.ai 连不上", "开启全局代理");
             else
-                r.Sig("出口", "claude.ai 可达", 4, 60, "HTTP " + f.WebCode, "换干净节点");
+                r.Sig("出口", "claude.ai 可达", 2, 60, "HTTP " + f.WebCode, "换干净节点");
+
+            if (f.SiteCode == 200 || f.SiteCode == 301 || f.SiteCode == 302 || f.SiteCode == 307)
+                r.Sig("出口", "anthropic.com 可达", 2, 100, "HTTP " + f.SiteCode, null);
+            else if (f.SiteCode == 403)
+                r.Sig("出口", "anthropic.com 可达", 2, 20, "HTTP 403 被拦", "换支持地区的干净节点",
+                    "anthropic.com 返回 403，官网侧也被拦", "换支持地区的干净节点");
+            else if (f.SiteCode == 0)
+                r.Sig("出口", "anthropic.com 可达", 2, 0, "连不上", "开全局代理", "anthropic.com 连不上", "开启全局代理");
+            else r.Sig("出口", "anthropic.com 可达", 2, 60, "HTTP " + f.SiteCode, "换干净节点");
+
+            // IPv6 出口: 没有最省心；有就必须和 IPv4 同地区，否则代理没接管 IPv6 等于开了后门
+            if (string.IsNullOrEmpty(f.Ipv6))
+                r.Sig("出口", "IPv6 出口", 3, 100, "无 IPv6(无泄漏面)", null);
+            else if (string.IsNullOrEmpty(f.Ipv6Cc))
+                r.Sig("出口", "IPv6 出口", 3, 60, "归属未知", "确认代理是否接管 IPv6");
+            else if (string.Equals(f.Ipv6Cc, f.Country, StringComparison.OrdinalIgnoreCase))
+                r.Sig("出口", "IPv6 出口", 3, 100, f.Ipv6Cc + " 与 IPv4 一致", null);
+            else
+                r.Sig("出口", "IPv6 出口", 3, 0, f.Ipv6Cc + " ≠ " + f.Country,
+                    "在代理里开启 IPv6 接管，或在网络设置里关掉 IPv6",
+                    "IPv6 出口在 " + f.Ipv6Cc + "，与 IPv4 出口 " + f.Country + " 不一致 —— 代理没接管 IPv6，真实地区被暴露",
+                    "开启代理的 IPv6 接管或关闭系统 IPv6");
 
             if (!string.IsNullOrEmpty(f.Country) && !string.IsNullOrEmpty(f.Country2))
             {
@@ -563,13 +607,13 @@ namespace CheckClaude
 
             // B. 出口质量 (12)
             if (f.Proxy)
-                r.Sig("质量", "IP 类型", 6, 25, "公开代理/VPN", "换独享节点或住宅 IP",
+                r.Sig("质量", "IP 类型", 5, 25, "公开代理/VPN", "换独享节点或住宅 IP",
                     "出口 IP 被标记为公开代理/VPN 出口，属高风控段", "换独享节点或住宅 IP");
             else if (f.Hosting == 1)
-                r.Sig("质量", "IP 类型", 6, 50, "机房 IDC", "换住宅 / 家宽节点",
+                r.Sig("质量", "IP 类型", 5, 50, "机房 IDC", "换住宅 / 家宽节点",
                     "出口是机房(IDC) IP: " + f.Isp + "，风控强度高于住宅", "有条件换住宅/家宽节点");
-            else if (f.Hosting == 0) r.Sig("质量", "IP 类型", 6, 100, "住宅", null);
-            else r.Sig("质量", "IP 类型", 6, 70, "未知", "重新体检");
+            else if (f.Hosting == 0) r.Sig("质量", "IP 类型", 5, 100, "住宅", null);
+            else r.Sig("质量", "IP 类型", 5, 70, "未知", "重新体检");
 
             if (!string.IsNullOrEmpty(f.CfLoc) && !string.IsNullOrEmpty(f.Country))
             {
@@ -619,17 +663,33 @@ namespace CheckClaude
 
             string localeCc = f.Locale != null && f.Locale.Contains("-") ? f.Locale.Split('-').Last() : null;
             if (string.IsNullOrEmpty(f.Country) || localeCc == null)
-                r.Sig("画像", "系统区域匹配出口", 5, 50, "数据不足", "重新体检");
+                r.Sig("画像", "系统区域匹配出口", 4, 50, "数据不足", "重新体检");
             else if (string.Equals(localeCc, f.Country, StringComparison.OrdinalIgnoreCase))
-                r.Sig("画像", "系统区域匹配出口", 5, 100, f.Locale, null);
+                r.Sig("画像", "系统区域匹配出口", 4, 100, f.Locale, null);
             else if (f.LangName == "zh")
-                r.Sig("画像", "系统区域匹配出口", 5, 50, f.Locale + " vs " + f.Country,
+                r.Sig("画像", "系统区域匹配出口", 4, 50, f.Locale + " vs " + f.Country,
                     "只用 Claude Code(CLI) 可忽略；常用网页端可把系统区域改成 " + f.Country,
                     "系统语言中文 + 区域 " + localeCc + " 与出口 " + f.Country + " 不一致(网页端登录会暴露矛盾)",
                     "常用网页端可把系统区域改成 " + f.Country);
             else
-                r.Sig("画像", "系统区域匹配出口", 5, 70, f.Locale + " vs " + f.Country,
+                r.Sig("画像", "系统区域匹配出口", 4, 70, f.Locale + " vs " + f.Country,
                     "把系统区域改成 " + f.Country, "系统区域 " + localeCc + " 与出口 " + f.Country + " 不一致");
+
+            // 简繁与出口地区的对应: 繁体主要用于 TW/HK/MO，简体用于 CN/SG
+            string variant = null, ln = (f.Locale ?? "").ToLowerInvariant();
+            if (ln.Contains("hant") || ln.EndsWith("-tw") || ln.EndsWith("-hk") || ln.EndsWith("-mo")) variant = "繁体";
+            else if (ln.StartsWith("zh")) variant = "简体";
+            var tw = new[] { "TW", "HK", "MO" }; var cn = new[] { "CN", "SG", "MY" };
+            if (variant == null || string.IsNullOrEmpty(f.Country))
+                r.Sig("画像", "语言变体一致", 2, 100, variant ?? "非中文", null);
+            else if (variant == "繁体" && tw.Contains(f.Country.ToUpperInvariant()))
+                r.Sig("画像", "语言变体一致", 2, 100, "繁体 · " + f.Country, null);
+            else if (variant == "简体" && cn.Contains(f.Country.ToUpperInvariant()))
+                r.Sig("画像", "语言变体一致", 2, 100, "简体 · " + f.Country, null);
+            else
+                r.Sig("画像", "语言变体一致", 2, 50, variant + " vs " + f.Country,
+                    "网页端登录前可把首选语言调成 en-US",
+                    "系统用" + variant + "中文但出口在 " + f.Country + "，语言变体与地区画像不对应");
 
             // D. DNS (10)
             if (f.DnsVerdict.StartsWith("正常") || f.DnsVerdict.StartsWith("代理接管"))
@@ -684,7 +744,9 @@ namespace CheckClaude
             // F. 浏览器画像 (15) —— Windows 版不带 WebView2 依赖，按中性 70% 计分，不假装测过
             r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "Windows 版暂不采集浏览器信号");
             r.Sig("浏览器", "浏览器时区", 4, 70, "未采集", "Windows 版暂不采集浏览器信号");
-            r.Sig("浏览器", "浏览器语言", 3, 70, "未采集", "Windows 版暂不采集浏览器信号");
+            r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
+            // 1 分的项不值得因为"没测"就扣成 0/1，那看起来像 bug
+            r.Sig("浏览器", "Intl 区域设置", 1, 100, "未采集", null);
             r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "Windows 版暂不采集浏览器信号");
 
             if (r.Score >= 85) { r.Grade = "优秀"; r.Verdict = "环境适合运行 Claude"; }
