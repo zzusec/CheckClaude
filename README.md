@@ -28,8 +28,16 @@ Claude 环境 🟢 98 分 · 优秀
 两端同一套评分模型（20 项加权信号，合计 100）。Windows 版的浏览器 4 项按中性 70% 计分——
 单文件 exe 带不了 WebView2 依赖，和 macOS 命令行单跑是同一口径，不假装测过。
 
-Windows 版是 .NET Framework 4.8（系统预装）+ `csc.exe` 编译的单个 46KB exe，托盘常驻。
+Windows 版是 .NET Framework 4.8（系统预装）+ `csc.exe` 编译的单个 49KB exe，托盘常驻。
 修改系统时区和 DNS 需要管理员权限，点「一键修复」时会弹一次 UAC。
+
+```
+CheckClaude.exe --check     # 打印完整体检报告，不启动托盘
+CheckClaude.exe --version   # 打印版本号
+```
+
+托盘右键菜单里可勾选「开机自启」（写 HKCU Run 项，不需要管理员）。
+首次运行若被 SmartScreen 拦（未做代码签名），点「更多信息」→「仍要运行」。
 
 ## 快速开始
 
