@@ -137,8 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("更新时间: \(s["time"] ?? "—")"))
         menu.addItem(.separator())
         menu.addItem(claudeMenuItem())
-        // 修复入口放在主菜单一级，不藏进子菜单里
+        // 体检和修复都放主菜单一级，不藏进子菜单(子菜单只放明细)
         let c = readStatus(claudeStatusPath)
+        menu.addItem(action("重新体检", #selector(runClaudeCheck)))
         if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
             let fix = action("⚡ 一键修复：\(list)", #selector(runClaudeFix))
             fix.attributedTitle = NSAttributedString(
@@ -246,10 +247,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(disabled("体检时间: \(c["time"] ?? "—")"))
         }
         sub.addItem(.separator())
-        sub.addItem(action("重新体检", #selector(runClaudeCheck)))
-        if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
-            sub.addItem(action("一键修复：\(list)", #selector(runClaudeFix)))
-        }
         if let cc = c["country"], cc != "?", (c["locale"] ?? "").hasSuffix("_\(cc)") == false {
             sub.addItem(action("把系统区域改为 \(cc)", #selector(runClaudeFixLocale)))
         }
