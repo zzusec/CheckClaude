@@ -580,6 +580,18 @@ compute_score() {
     fi
   fi
 
+  # 关键项一票否决: 这几项任一不满分，总分再高也不能算"可用"。
+  # 90 分可能是"丢了 10 分轻微项(浏览器语言/Intl/渲染)"，也可能是
+  # "WebRTC 泄漏 6 分 + 时区不符 5 分" —— 后者真实出口已经暴露，风险天差地别。
+  local CRITICAL="|出口国家|Anthropic API 可达|系统时区匹配出口|WebRTC 出口|IPv6 出口|三路出口一致|"
+  local crit_fail="" row cg cl cw cp cv
+  for row in "${SIGNALS[@]}"; do
+    IFS='~' read -r cg cl cw cp cv <<<"$row"
+    case "$CRITICAL" in
+      *"|$cl|"*) [[ ${cp:-0} -lt ${cw:-0} ]] && crit_fail+="${crit_fail:+、}$cl" ;;
+    esac
+  done
+
   # 出口落在不服务地区是硬性阻断: 国内直连的画像其实很自洽(中文+国内IP+国内时区全一致)，
   # 不能让这些一致性得分把它抬进"基本可用"
   if [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; then
@@ -591,7 +603,11 @@ compute_score() {
     VERDICT="出口 IP 分流(国内 ${CN_IP} / 国外 ${INTL_IP})，账号画像会在多地区间跳变，不建议使用"
   # 档位措辞按二元标准: 只有绿档说"可用"，其余一律明说"不建议使用" ——
   # 原来 83 分显示"良好"，和橙色图标、"不建议使用"的通知自相矛盾。
-  elif [[ $SCORE -ge 85 ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
+  elif [[ $SCORE -ge 90 && -z "$crit_fail" ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
+  elif [[ -n "$crit_fail" ]]; then
+    GRADE="有风险"; VERDICT="关键项未达标（${crit_fail}），不建议使用 Claude"
+    [[ $SCORE -lt 70 ]] && GRADE="高风险"
+    [[ $SCORE -lt 50 ]] && GRADE="危险"
   elif [[ $SCORE -ge 70 ]]; then GRADE="有风险"; VERDICT="存在矛盾信号，不建议使用 Claude，先按提示修复"
   elif [[ $SCORE -ge 50 ]]; then GRADE="高风险"; VERDICT="多项信号冲突，不建议在当前环境登录或使用 Claude"
   else                           GRADE="危险"; VERDICT="环境画像严重冲突，使用 Claude 有较高封号风险"
