@@ -1,15 +1,28 @@
-# auto-timezone
+# CheckClaude
 
-按 **ip111.cn 的逻辑做三路出口 IP 一致性检测**，并把 macOS 系统时区**自动设为"谷歌测试 IP"对应的时区**。
-菜单栏常驻图标显示状态（✓绿=三路一致 / ✗红=异常）；出口 IP 变化或三路不一致时弹桌面告警。
+**检查这台机器适不适合跑 Claude**，并把能自动修的直接修掉。附带按出口 IP 自动设置 macOS 系统时区。
 
-适合经常切换 VPN / 代理出口的人：出口到哪个地区，系统时区就自动跟到哪；同时帮你发现分流 / DNS 泄漏导致的出口不一致。仅依赖系统自带工具（bash + Swift），无第三方运行时依赖。
+菜单栏常驻，20 项加权信号打分（0–100），列出问题、差几分、下一步做什么；时区、DNS 泄漏、PAC 分流可以一键修复。
+只依赖系统自带工具（bash + Swift），无第三方运行时依赖，不要账号，不上传任何数据。
+
+```
+Claude 环境 🟢 98 分 · 优秀
+   环境适合运行 Claude
+   ── 还能提 2 分 ──
+      ＋2  出口稳定性：固定一个节点，24 小时内别切线路
+   ── 出口 ──
+   ✓ 出口国家：US Los Angeles          18/18
+   ✓ Anthropic API 可达：HTTP 401      10/10
+   …
+```
+
+> 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/zzusec/auto-timezone.git
-cd auto-timezone
+git clone https://github.com/zzusec/CheckClaude.git
+cd CheckClaude
 bash install.sh          # 构建并装到 /Applications + 开机自启，无需 sudo
 ```
 
@@ -22,8 +35,8 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：20 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
 | `test-claude-check.sh` | 体检评分逻辑自测（不联网） |
-| `com.hx10.auto-timezone.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
-| `menubar/AutoTimezone.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
+| `com.hx10.checkclaude-daemon.plist` | 系统守护进程：每 5 分钟 + 网络变化触发（root，改时区免密码） |
+| `menubar/CheckClaude.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
 | `menubar/*.plist` | 菜单栏 App 的开机自启 LaunchAgent |
 | `install.sh` / `uninstall.sh` | 一键安装 / 卸载 |
 | `status` / `last_state` / `*.log` | 运行快照 / 变化基线 / 日志 |
@@ -42,16 +55,16 @@ bash install.sh          # 构建并装到 /Applications + 开机自启，无需
 - 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
 
-## Claude 运行环境体检（v1.8）
+## Claude 运行环境体检
 
 判断当前环境是否适合运行 Claude / Claude Code：打分 + 问题清单 + 修复建议 + 自动修复。
 评分模型参考 [check-cc](https://github.com/yacuo/check-cc) 的多信号加权思路，改为 macOS 本地实现，
 复用上面已经拿到的三路出口数据，不额外依赖 Node。
 
 ```bash
-~/auto-timezone/claude-check.sh              # 体检并打印报告
-~/auto-timezone/claude-check.sh --fix        # 顺带自动修可安全修复项（时区）
-~/auto-timezone/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
+~/CheckClaude/claude-check.sh              # 体检并打印报告
+~/CheckClaude/claude-check.sh --fix        # 顺带自动修可安全修复项（时区）
+~/CheckClaude/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
 ```
 
 共 **20 项加权信号**，合计 100 分，分 6 组：
@@ -142,18 +155,18 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 ## 打包成 dmg(分发)
 
 ```bash
-bash ~/auto-timezone/build_dmg.sh   # 生成 AutoTimezone.dmg
+bash ~/CheckClaude/build_dmg.sh   # 生成 CheckClaude.dmg
 ```
 
-App 自包含:检测脚本打包在 `AutoTimezone.app/Contents/Resources/`，数据写入
-`~/Library/Application Support/AutoTimezone`，改时区时弹一次系统授权框 —— 不依赖
+App 自包含:检测脚本打包在 `CheckClaude.app/Contents/Resources/`，数据写入
+`~/Library/Application Support/CheckClaude`，改时区时弹一次系统授权框 —— 不依赖
 root 守护进程，拷到任何 Mac 都能用。挂载 dmg 后把 App 拖进 Applications 即可，
 首次右键→打开绕过未签名提示。开机自启在「系统设置→通用→登录项」添加。
 
 ## 安装(本机，含 root 守护进程方案)
 
 ```bash
-bash ~/auto-timezone/install.sh    # 不要加 sudo；脚本内部会在装守护进程时索要一次密码
+bash ~/CheckClaude/install.sh    # 不要加 sudo；脚本内部会在装守护进程时索要一次密码
 ```
 
 安装内容：① 编译菜单栏 App　② 加载 root 守护进程（自动改时区 + 告警）　③ 菜单栏 App 设为开机自启。
@@ -163,15 +176,15 @@ bash ~/auto-timezone/install.sh    # 不要加 sudo；脚本内部会在装守�
 ## 卸载
 
 ```bash
-bash ~/auto-timezone/uninstall.sh
+bash ~/CheckClaude/uninstall.sh
 ```
 
 ## 手动用法
 
 ```bash
-~/auto-timezone/auto-timezone.sh --check     # 只检测三路一致性并打印，不改时区
-~/auto-timezone/auto-timezone.sh --dry-run   # 检测 + 显示将改的时区，不实际改
-~/auto-timezone/auto-timezone.sh             # 检测 + 按谷歌侧 IP 自动改时区（需 sudo）
+~/CheckClaude/auto-timezone.sh --check     # 只检测三路一致性并打印，不改时区
+~/CheckClaude/auto-timezone.sh --dry-run   # 检测 + 显示将改的时区，不实际改
+~/CheckClaude/auto-timezone.sh             # 检测 + 按谷歌侧 IP 自动改时区（需 sudo）
 ```
 
 ## 工作原理
@@ -181,3 +194,17 @@ bash ~/auto-timezone/uninstall.sh
 3. 读 `/etc/localtime` 软链得当前时区（无需 sudo），相同则跳过。
 4. `/usr/share/zoneinfo/<tz>` 校验合法后，`systemsetup -settimezone` 写入。
 5. 与上次状态对比，IP 变化或一致性翻转则弹桌面通知。
+
+---
+
+## 关于作者
+
+这个工具是我自己每天在用的东西，顺手开源。我的主力产品是：
+
+### 叮叮提醒 — 重要的事，我来帮你记着
+
+吃药、还款、农历生日、纪念日倒数、考试倒计时——**说一句话就能创建**，到点通过微信、邮件、短信或电话送达。
+微信小程序 / macOS / Windows 三端同步，**微信与邮件提醒终生免费**。
+
+- 官网：<https://www.yinso.com>
+- 微信小程序搜「**叮叮提醒**」，无需下载安装

@@ -3,16 +3,16 @@
 # 用法: bash install.sh   (在仓库目录下运行)
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-AGENT="com.hx10.auto-timezone-menubar"
+AGENT="com.hx10.checkclaude"
 
 echo "==> 1/3 构建 App"
 bash "$DIR/menubar/build.sh"
 
 echo "==> 2/3 安装到 /Applications"
 launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
-pkill -x AutoTimezone 2>/dev/null || true
-ditto "$DIR/menubar/AutoTimezone.app" /Applications/AutoTimezone.app
-codesign --force --deep --sign - /Applications/AutoTimezone.app 2>/dev/null || true
+pkill -x CheckClaude 2>/dev/null || true
+ditto "$DIR/menubar/CheckClaude.app" /Applications/CheckClaude.app
+codesign --force --deep --sign - /Applications/CheckClaude.app 2>/dev/null || true
 
 echo "==> 3/3 设为开机自启(当前用户)"
 mkdir -p "$HOME/Library/LaunchAgents"

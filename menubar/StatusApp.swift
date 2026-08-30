@@ -4,11 +4,17 @@ import WebKit
 // auto-timezone 菜单栏监控 App (LSUIElement)
 // 自包含: 检测脚本打包在 App 内，数据写入用户的 Application Support 目录。
 
-// 数据目录: ~/Library/Application Support/AutoTimezone
+// 数据目录: ~/Library/Application Support/CheckClaude
 let baseDir: String = {
     let appSup = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-    let dir = appSup.appendingPathComponent("AutoTimezone")
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let dir = appSup.appendingPathComponent("CheckClaude")
+    // v2.0 改名前叫 AutoTimezone，把旧目录搬过来保住历史日志(出口稳定性要读 24h 记录)
+    let old = appSup.appendingPathComponent("AutoTimezone")
+    let fm = FileManager.default
+    if !fm.fileExists(atPath: dir.path), fm.fileExists(atPath: old.path) {
+        try? fm.moveItem(at: old, to: dir)
+    }
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir.path
 }()
 let statusPath = (baseDir as NSString).appendingPathComponent("status")
@@ -32,10 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         item.menu = NSMenu()
-        item.autosaveName = "AutoTimezoneStatusItem"   // 记住用户 ⌘拖动后的位置，开机后不再回到刘海
+        item.autosaveName = "CheckClaudeStatusItem"   // 记住用户 ⌘拖动后的位置，开机后不再回到刘海
         item.behavior = .removalAllowed
         refresh()
-        notify("出口IP时区监控已启动", "图标在屏幕右上角菜单栏 🌐，点击查看出口IP与时区")
+        notify("CheckClaude已启动", "图标在屏幕右上角菜单栏 🌐，点击查看出口IP与时区")
         runScript(["--once"])            // 启动即检测一次
         // 每 30 秒读快照刷新显示
         uiTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
@@ -161,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         let ver = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
         menu.addItem(disabled("版本 v\(ver)"))
+        menu.addItem(action("叮叮提醒 — 重要的事，我来帮你记着", #selector(openYinso)))
         menu.addItem(action("退出", #selector(quit)))
         item.menu = menu
 
@@ -217,14 +224,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let c = readStatus(claudeStatusPath)
         let score = Int(c["score"] ?? "") ?? -1
         let dot = score < 0 ? "⚪️" : (score >= 85 ? "🟢" : score >= 70 ? "🟡" : score >= 50 ? "🟠" : "🔴")
-        var title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
-        if score >= 0 && score < 100 { title += "（还能提 \(100 - score) 分）" }
+        // 提分详情在子菜单顶部，标题只报状态，不啰嗦
+        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
+        // 低于 70 分 = 环境不适合跑 Claude，整块标红，别让人漏看
+        let unfit = score >= 0 && score < 70
+        let alertColor: NSColor = unfit ? .systemRed : .labelColor
 
         let sub = NSMenu()
         if score < 0 {
             sub.addItem(disabled("尚未体检"))
         } else {
-            sub.addItem(disabled(c["verdict"] ?? ""))
+            sub.addItem(unfit ? colored(c["verdict"] ?? "", .systemRed) : disabled(c["verdict"] ?? ""))
 
             // 提分清单放最前面，橙色可点，别埋在明细里跟着一起变灰
             let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
@@ -255,7 +265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     sub.addItem(disabled("── \(group) ──"))
                 }
                 let ok = f[2] == f[3]
-                sub.addItem(disabled("\(ok ? "✓" : "⚠")  \(f[1])：\(f[4])   \(f[3])/\(f[2])"))
+                let line = "\(ok ? "✓" : "⚠")  \(f[1])：\(f[4])   \(f[3])/\(f[2])"
+                sub.addItem(unfit && !ok ? colored(line, .systemRed) : disabled(line))
             }
             sub.addItem(.separator())
             sub.addItem(disabled("出口: \(c["ip"] ?? "?") · \(c["city"] ?? "") · \(c["asn"] ?? "?")"))
@@ -266,7 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
             if !issues.isEmpty {
                 sub.addItem(.separator())
-                issues.forEach { sub.addItem(disabled("⚠️  \($0)")) }
+                issues.forEach { sub.addItem(unfit ? colored("⚠️  \($0)", .systemRed) : disabled("⚠️  \($0)")) }
             }
             if !fixes.isEmpty {
                 sub.addItem(.separator())
@@ -284,6 +295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        if unfit {
+            item.attributedTitle = NSAttributedString(string: title, attributes: [
+                .foregroundColor: alertColor,
+                .font: NSFont.menuFont(ofSize: 0)
+            ])
+        }
         item.submenu = sub
         return item
     }
@@ -294,6 +311,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
     @objc func runCheck() { runScript(["--once"]) }
+
+    @objc func openYinso() {
+        NSWorkspace.shared.open(URL(string: "https://www.yinso.com")!)
+    }
 
     @objc func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
