@@ -151,7 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(disabled("谷歌侧时区: \(s["gfwtz"] ?? "?")"))
         menu.addItem(disabled("系统时区: \(tz)"))
-        menu.addItem(disabled("更新时间: \(s["time"] ?? "—")"))
+        // 时间戳跟着系统时区走，而系统时区跟着出口走 —— 出口回到国内时它就是本地时间
+        let exitCC = readStatus(claudeStatusPath)["country"] ?? ""
+        menu.addItem(disabled("\(exitCC == "CN" ? "本地时间" : "海外时间"): \(s["time"] ?? "—")"))
         menu.addItem(.separator())
         menu.addItem(claudeMenuItem())
         // 体检和修复都放主菜单一级，不藏进子菜单(子菜单只放明细)
