@@ -249,3 +249,9 @@ bash ~/CheckClaude/uninstall.sh
 
 - 官网：<https://www.yinso.com>
 - 微信小程序搜「**叮叮提醒**」，无需下载安装
+
+---
+
+## 致谢
+
+感谢 [linux.do](https://linux.do/) —— 一个充满活力的技术社区，本项目也在这里分享和交流。
