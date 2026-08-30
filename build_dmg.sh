@@ -20,7 +20,10 @@ CheckClaude CheckClaude
 
 安装: 把 CheckClaude.app 拖到 Applications 文件夹。
 
-首次打开: 右键 App → 打开(绕过未签名提示)。
+首次打开被拦(未做代码签名),macOS 15 起「右键→打开」已失效,两种办法:
+  ① 终端执行: xattr -dr com.apple.quarantine /Applications/CheckClaude.app
+  ② 双击一次让它被拦,然后 系统设置 → 隐私与安全性 → 往下滚到"安全性"
+     → "已阻止使用 CheckClaude" → 点"仍要打开"
 图标出现在屏幕右上角菜单栏(🌐 + 出口时区城市)。
 
 功能:

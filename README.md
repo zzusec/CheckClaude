@@ -22,7 +22,7 @@ Claude 环境 🟢 98 分 · 优秀
 
 | 平台 | 下载 | 要求 |
 |---|---|---|
-| macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次右键→打开 |
+| macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
 两端同一套评分模型（20 项加权信号，合计 100）。Windows 版的浏览器 4 项按中性 70% 计分——
@@ -47,7 +47,18 @@ cd CheckClaude
 bash install.sh          # 构建并装到 /Applications + 开机自启，无需 sudo
 ```
 
-首次打开若被 Gatekeeper 拦：右键 App → 打开。改时区时会弹一次系统授权框（密码 / Touch ID），属正常。
+首次打开会被 Gatekeeper 拦（未做代码签名）。macOS 15 起 Apple **移除了「右键→打开」**这条绕过路径，
+现在有两种办法：
+
+```bash
+# 办法一：终端一条命令解除隔离，最快
+xattr -dr com.apple.quarantine /Applications/CheckClaude.app
+```
+
+办法二：双击一次让它被拦，然后 **系统设置 → 隐私与安全性** → 往下滚到「安全性」→
+「已阻止使用 "CheckClaude"」→ 点「**仍要打开**」。
+
+改时区时会弹一次系统授权框（密码 / Touch ID），属正常。
 
 ## 组成
 
@@ -185,7 +196,7 @@ bash ~/CheckClaude/build_dmg.sh   # 生成 CheckClaude.dmg
 App 自包含:检测脚本打包在 `CheckClaude.app/Contents/Resources/`，数据写入
 `~/Library/Application Support/CheckClaude`，改时区时弹一次系统授权框 —— 不依赖
 root 守护进程，拷到任何 Mac 都能用。挂载 dmg 后把 App 拖进 Applications 即可，
-首次右键→打开绕过未签名提示。开机自启在「系统设置→通用→登录项」添加。
+首次打开被拦时按上面「快速开始」里的两种办法之一处理。开机自启在「系统设置→通用→登录项」添加。
 
 ## 安装(本机，含 root 守护进程方案)
 
