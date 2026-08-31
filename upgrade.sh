@@ -118,9 +118,18 @@ do_install() {
   # 回调根本没机会执行，新 App 起来会读到残留状态一直显示"正在重启"。
   rm -f "$USTATE"
 
-  # 重启自己。kickstart 会杀掉当前 App 进程，本脚本是独立进程能跑完。
-  launchctl kickstart -k "gui/$(id -u)/${AGENT}" 2>/dev/null \
-    || open -a "$APP" 2>/dev/null
+  # 重启自己。三种情况都要覆盖:
+  #   ① 装了 LaunchAgent      -> kickstart 直接重启
+  #   ② 手动双击打开的        -> 没有那个 label，kickstart 必失败；
+  #                              而 open -a 对已在运行的 App 是空操作，必须先杀掉进程
+  #   ③ 没在运行              -> 直接 open
+  # 之前只写了 kickstart || open，②的情况下磁盘换成新版但内存还跑旧进程，
+  # 菜单栏一直显示旧版本号。
+  if ! launchctl kickstart -k "gui/$(id -u)/${AGENT}" 2>/dev/null; then
+    pkill -f "/Applications/CheckClaude.app/Contents/MacOS/CheckClaude" 2>/dev/null
+    sleep 1
+    open -a "$APP" 2>/dev/null
+  fi
   echo "✅ 已升级到 v${latest}"
 }
 
