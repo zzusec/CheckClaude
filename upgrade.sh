@@ -110,10 +110,13 @@ do_install() {
   hdiutil detach "$mnt" -quiet 2>/dev/null
   rm -rf "$tmp"
 
-  state "完成，正在重启"
   log "upgrade: ${cur} -> ${latest} 安装完成"
   notify "CheckClaude 已升级" "${cur} → ${latest}，正在重启"
   do_check >/dev/null
+
+  # 状态文件必须在这里清 —— kickstart 会杀掉 App，Swift 侧那个"脚本结束后清理"的
+  # 回调根本没机会执行，新 App 起来会读到残留状态一直显示"正在重启"。
+  rm -f "$USTATE"
 
   # 重启自己。kickstart 会杀掉当前 App 进程，本脚本是独立进程能跑完。
   launchctl kickstart -k "gui/$(id -u)/${AGENT}" 2>/dev/null \

@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var updateTimer: Timer?
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        // 上次升级若被 kickstart 打断，状态文件可能残留，启动时先清掉
+        try? FileManager.default.removeItem(atPath: upgradeStatePath)
         item.menu = NSMenu()
         item.autosaveName = "CheckClaudeStatusItem"   // 记住用户 ⌘拖动后的位置，开机后不再回到刘海
         item.behavior = .removalAllowed
