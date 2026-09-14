@@ -1,17 +1,24 @@
 #!/bin/bash
 # claude-check.sh 评分逻辑自测: 不联网，直接喂信号给 compute_score 断言分数与建议。
 set -uo pipefail
+TEST_DATA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/checkclaude-score.XXXXXX")
+export AUTO_TZ_DIR="$TEST_DATA_DIR"
 export CC_SELFTEST=1
 source "$(dirname "$0")/claude-check.sh"
+trap 'rm -rf "$TMP" "$TEST_DATA_DIR"' EXIT
 
 FAIL=0
 check() { # check <描述> <实际> <期望>
   if [[ "$2" == "$3" ]]; then echo "  ✓ $1"; else echo "  ✗ $1: 实际=$2 期望=$3"; FAIL=1; fi
 }
 
+# 评分测试必须完全离线；WebRTC 泄漏归属查询固定返回 US。
+ip_country_code() { printf '%s\n' US; }
+
 # 一个"完美环境"的基线，各用例只覆盖自己关心的字段
 base_signals() {
-  COUNTRY=US; COUNTRY2=US; COUNTRY_NAME=美国; CITY=LA; ISP=Comcast; ASN=AS7922
+  COUNTRY=US; COUNTRY2=US; COUNTRY3=US; COUNTRY4=US; COUNTRY_NAME=美国; CITY=LA; ISP=Comcast; ASN=AS7922
+  INTEL_SOURCES="ip-api:US,ipinfo:US,ipwho:US,ip.sb:US"; INTEL_COUNT=4
   HOSTING=0; PROXY=0
   API_CODE=401; WEB_CODE=200; API_REGION_BLOCK=0
   CF_COLO=LAX; CF_LOC=US; CF_IP=1.2.3.4; PROBE_IP=1.2.3.4; CN_IP=1.2.3.4; INTL_IP=1.2.3.4
@@ -23,9 +30,12 @@ base_signals() {
   CLAUDE_BASE=""; CLAUDE_VER=test
   IP_CHANGES=0; VM_HOST=物理机
   BR_OK=1; BR_TZ=America/Los_Angeles; BR_LANGS=en-US,en; BR_LOCALE=en-US
-  BR_RTC=1.2.3.4; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"; BR_LOCALE=en-US
+  BR_RTC=1.2.3.4; BR_RTC_STATUS=ok; BR_RTC_SUPPORTED=1; BR_RTC_CANDIDATES=2; BR_RTC_PUBLIC_COUNT=1
+  BR_RTC_MS=350; BR_RTC_ERROR=""; BR_WEBGL="Apple M1"; BR_FONTS="PingFang SC"; BR_LOCALE=en-US
   SITE_CODE=200; IPV6=""; IPV6_CC=""; SYS_LANGS=en-US
-  OS_VER="macOS 26.6"; BR_SOURCE=browser; BR_UA=Chrome; BR_CH_PLAT=macOS; BR_ACCEPT=en-US; BR_UAD_PLAT=macOS
+  OS_VER="macOS 26.6"; BR_SOURCE=browser; BR_UA=Chrome; BR_UA_JS=Chrome
+  BR_CH_UA=Chromium; BR_CH_PLAT=macOS; BR_ACCEPT=en-US; BR_UAD_PLAT=macOS; BR_UAD_BRANDS=Chromium
+  BR_SF_SITE=same-origin; BR_SF_MODE=cors; BR_SF_DEST=empty
 }
 
 echo "① 完美环境 => 100 分且无问题"
@@ -70,7 +80,7 @@ PAC_ON=1; PROXY_MODE="系统 HTTP 代理 + PAC 分流"; CF_IP=9.9.9.9; COUNTRY2=
 compute_score
 check "点名 PAC" "$(echo "$ISSUES" | grep -c 'PAC 自动分流')" 1
 check "点名多层代理" "$(echo "$ISSUES" | grep -c '链路上还有一层代理')" 1
-check "点名情报冲突" "$(echo "$ISSUES" | grep -c '情报库对该出口判定不一致')" 1
+check "点名情报冲突" "$(echo "$ISSUES" | grep -c 'IP 情报库对同一出口.*国家码判定不一致')" 1
 
 echo "⑦ DNS 被污染 => 扣满 6 分"
 base_signals; compute_score; full=$SCORE
@@ -84,7 +94,7 @@ base_signals; API_CODE=000; compute_score
 check "无中转则明确报连不上" "$(echo "$ISSUES" | grep -c '连不上(超时/DNS 污染)')" 1
 
 echo "⑨ 情报接口全挂(国家未知) => 不至于判死"
-base_signals; COUNTRY=""; COUNTRY2=""; CF_LOC=""; CF_IP=""; HOSTING=-1; compute_score
+base_signals; COUNTRY=""; COUNTRY2=""; COUNTRY3=""; COUNTRY4=""; INTEL_SOURCES=""; INTEL_COUNT=0; CF_LOC=""; CF_IP=""; HOSTING=-1; compute_score
 check "仍有分" "$([[ $SCORE -gt 40 ]] && echo yes)" yes
 
 echo "⑩ WebRTC 暴露了另一个出口 => 扣满 6 分并给建议"
@@ -126,6 +136,68 @@ base_signals; compute_score
 SYS_TZ=Asia/Shanghai; GFW_TZ=America/New_York; SYS_LOCALE=zh_CN; SYS_LANG=zh; LOCALE_CC=CN; HOSTING=1
 compute_score
 check "85-89 分不叫优秀" "$([[ $SCORE -ge 85 && $SCORE -lt 90 && $GRADE != 优秀 ]] && echo yes || echo "$SCORE/$GRADE")" yes
+
+echo "⑯ WebRTC 明确完成且无公网候选 => 满分"
+base_signals; BR_RTC=""; BR_RTC_STATUS=none; BR_RTC_PUBLIC_COUNT=0; compute_score
+check "无公网候选不扣分" "$SCORE" 100
+check "显示明确完成" "$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ _ v <<<"$r"; [[ $l == 'WebRTC 出口' ]] && echo "$v"; done)" "检测完成，无公网候选"
+
+echo "⑰ WebRTC 超时 => 中性扣 2 分但不按确认泄漏一票否决"
+base_signals; BR_RTC=""; BR_RTC_STATUS=timeout; BR_RTC_PUBLIC_COUNT=0; compute_score
+check "超时按中性分" "$SCORE" 98
+check "超时不是确认泄漏" "$(echo "$VERDICT" | grep -c '关键项未达标.*WebRTC' || true)" 0
+
+echo "⑱ 四家 IP 情报国家码一致 => 3 分全拿"
+base_signals; compute_score
+intel_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p v <<<"$r"; [[ $l == '多源情报一致' ]] && echo "$p|$v"; done)
+check "情报一致得满分" "$intel_points" "3|4/4 · US"
+
+echo "⑲ 国家码大小写规范化，不产生假冲突"
+base_signals; COUNTRY2=us; COUNTRY3=Us; COUNTRY4=uS; compute_score
+intel_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p v <<<"$r"; [[ $l == '多源情报一致' ]] && echo "$p|$v"; done)
+check "大小写统一后仍一致" "$intel_points" "3|4/4 · US"
+
+echo "⑳ HTTP UA 与 JavaScript UA 冲突 => Client Hints 扣满"
+base_signals; BR_UA_JS=Safari; compute_score
+ch_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p _ <<<"$r"; [[ $l == 'Client Hints' ]] && echo "$p"; done)
+check "UA 冲突得 0 分" "$ch_points" 0
+check "UA 冲突给出问题" "$(echo "$ISSUES" | grep -c 'User-Agent 与 JavaScript' || true)" 1
+
+echo "㉑ HTTP 与 JavaScript 首选语言冲突 => 语言首标扣满"
+base_signals; BR_ACCEPT=zh-CN; BR_LANGS=en-US,en; compute_score
+lang_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p _ <<<"$r"; [[ $l == 'HTTP 语言首标' ]] && echo "$p"; done)
+check "语言头冲突得 0 分" "$lang_points" 0
+check "语言头冲突给出问题" "$(echo "$ISSUES" | grep -c 'Accept-Language 与 navigator.languages' || true)" 1
+
+echo "㉒ IP 情报响应解析 => 四家来源统一成 ISO 国家码"
+cat >"$TMP/ipapi" <<'JSON'
+{"status":"success","country":"United States","countryCode":"us","city":"Los Angeles","isp":"ISP A","org":"Org A","as":"AS1","hosting":false,"proxy":false}
+JSON
+cat >"$TMP/ipinfo" <<'JSON'
+{"country":"US","org":"Org B"}
+JSON
+cat >"$TMP/ipwho" <<'JSON'
+{"success":true,"country_code":"Us","connection":{"org":"Org C"}}
+JSON
+cat >"$TMP/ipsb" <<'JSON'
+{"country_code":"uS","organization":"Org D"}
+JSON
+: >"$TMP/cftrace"; echo 401 >"$TMP/apicode"; echo 200 >"$TMP/webcode"; echo 200 >"$TMP/sitecode"; : >"$TMP/ipv6"; : >"$TMP/apibody"
+parse_net
+check "解析四家来源" "$INTEL_SOURCES" "ip-api:US,ipinfo:US,ipwho:US,ip.sb:US"
+check "有效来源数" "$INTEL_COUNT" 4
+check "主国家码规范化" "$COUNTRY" US
+
+echo "㉓ 出口稳定性只统计已确认变化，不统计失败/恢复"
+now=$(date +%s); old=$((now - 90000))
+cat >"$NETWORK_HISTORY" <<EOF
+${old}|4|stable|1.1.1.1|1|1|1|1|1|1|1|1|1
+$((now - 120))|50|failure|1.1.1.1|0|10|0|10|0|10|0|10|0
+$((now - 60))|5|verifying|1.1.1.1|0|1|1|1|1|1|1|1|1
+${now}|4|stable|2.2.2.2|1|1|1|1|1|1|1|1|1
+EOF
+parse_stability
+check "24h 仅统计一次确认变化" "$IP_CHANGES" 1
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }

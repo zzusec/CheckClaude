@@ -27,6 +27,7 @@ Claude 环境 🟢 98 分 · 优秀
 
 两端使用同一套评分模型（26 项加权信号，合计 100）。完整体检会通过本机回环地址打开系统默认浏览器，
 采集 WebRTC、Intl、Client Hints、HTTP 语言首标、WebGL、Canvas 和字体等真实浏览器信号；数据只回传给本机 CheckClaude。
+浏览器桥接还会并行检查 `claude.ai`、Anthropic 官网和 API 的浏览器侧传输路径与耗时，用来发现浏览器扩展代理/PAC 与 shell 网络路径不一致；该结果是诊断信息，不把 `no-cors` 当作 HTTP 状态判断。
 命令行单跑没有浏览器上下文，浏览器组按中性分计入，不假装测过。
 
 Windows 版是 .NET Framework 4.8（Windows 10/11 系统自带）+ `csc.exe` 编译的单个 exe，托盘常驻。
@@ -67,8 +68,8 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：26 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
-| `test-claude-check.sh` | macOS 体检评分逻辑自测（不联网） |
-| `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级 |
+| `test-claude-check.sh` / `test-auto-timezone.sh` | macOS 体检评分与网络波动状态机自测（不联网） |
+| `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级；发现新版主动显示右下角提示，点击后在线安装并自动重启 |
 | `windows/Program.cs` | Windows 版托盘、检测、修复和升级主逻辑 |
 | `windows/BrowserBridge.cs` | Windows 真实浏览器指纹本地桥接 |
 | `windows/BrowserBridgeTests.cs` | Windows 浏览器桥接自动测试 |
@@ -77,7 +78,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | `menubar/CheckClaude.app` | 菜单栏图标 App（开机自启，监控 + 告警 + 手动检测） |
 | `menubar/*.plist` | 菜单栏 App 的开机自启 LaunchAgent |
 | `install.sh` / `uninstall.sh` | 一键安装 / 卸载 |
-| `status` / `last_state` / `*.log` | 运行快照 / 变化基线 / 日志 |
+| `status` / `last_state` / `network_history` / `*.log` | 运行快照 / 变化基线 / 24 小时分路趋势 / 日志 |
 
 ## 三路一致性检测（ip111 逻辑）
 
@@ -90,7 +91,10 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 谷歌/被封 | 访问谷歌等被封网站时的 IP | Cloudflare trace / ip.sb + Google 可达性 |
 
 - 三者一致 → 干净的真实出口（🟢）。
-- 三者不一致 / 有缺失 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），**弹桌面告警**。
+- 三者都成功但结果不一致 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），连续两次确认后告警。
+- 任一路临时超时 → 标记为网络检测波动，保留上次有效 IP；不会再产生 `IP → null → 原 IP` 的虚假变化。
+- 网络恢复或出现新 IP 时，连续两次得到相同结果才正式提交，避免公共查询接口偶发失败造成状态乱跳。
+- 每次检测分别记录国内、国外、谷歌侧和 Google 连通性的成功状态与耗时，自动保留最近 24 小时。
 - **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
 
 ## Claude 运行环境体检
@@ -112,7 +116,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 出口 | 出口国家 | 14 | 是否落在 Anthropic 不服务地区（CN/HK/RU/IR…） |
 | 出口 | Anthropic API 可达 | 10 | 返回 401 为正常；403 = 出口被地区拦截 |
 | 出口 | **IPv6 出口** | 3 | 代理只接管 IPv4 时，IPv6 直连会暴露真实地区 |
-| 出口 | 多源情报一致 | 3 | 两家 IP 情报库对该出口判定是否冲突 |
+| 出口 | 多源情报一致 | 3 | 四家 IP 情报源针对同一出口的 ISO 国家码是否一致 |
 | 出口 | claude.ai 可达 | 2 | 测 `robots.txt`——主页对裸 curl 一律 403，那是 bot 挑战 |
 | 出口 | **anthropic.com 可达** | 2 | 官网与 API 走不同前端，分开测才能区分整体被拦与单点异常 |
 | 质量 | IP 类型 | 4 | 住宅 / 机房 IDC / 公开代理 |
@@ -128,7 +132,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 稳定 | 出口稳定性 | 4 | 24h 内出口跳变次数（读本地日志，网页端做不到） |
 | 稳定 | 代理形态 | 3 | TUN 全局 / 系统代理 / **PAC 分流**，可一键修复 |
 | 稳定 | 运行容器 | 3 | 物理机 / 虚拟机 |
-| 浏览器 | WebRTC 出口 | 6 | **UDP 不走 HTTP 代理**，能暴露代理没兜住的真实出口 |
+| 浏览器 | WebRTC 出口 | 6 | **UDP 不走 HTTP 代理**；区分检测完成无候选、发现公网候选、超时、异常/禁用，避免把 STUN 失败误报成安全 |
 | 浏览器 | 浏览器时区 | 3 | Intl 时区与系统时区是否一致 |
 | 浏览器 | 浏览器语言 | 2 | `navigator.languages` 与出口地区是否矛盾 |
 | 浏览器 | 渲染环境 | 2 | WebGL 渲染器 / Canvas 指纹 / 中文字体探测 |
@@ -138,7 +142,9 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 
 得分 ≥85 优秀 🟢，70–84 良好 🟡，50–69 风险 🟠，<50 高风险 🔴。
 
-菜单栏/托盘里的「重新体检」会打开系统默认浏览器，通过只监听 `127.0.0.1` 的一次性本地桥接采集浏览器组信号。
+菜单栏/托盘里的「重新体检」会打开系统默认浏览器，通过只监听 `127.0.0.1` 的一次性本地桥接采集浏览器组信号。桥接同时核对 HTTP UA 与 JavaScript UA、UA-CH 平台/品牌、`Accept-Language` 与 `navigator.languages`，并显示 `Sec-Fetch` 请求上下文。
+
+出口 IP 情报会并行查询 `ip-api`、`ipinfo`、`ipwho.is` 和 `api.ip.sb`。四家都针对同一个已确认出口 IP，国家统一为 ISO 两位代码后再比较；IPv4、IPv6 与 Cloudflare 边缘节点分开处理，避免把不同协议族或 CDN 中间节点误报成情报冲突。
 URL 带随机 token，结果写进本机 `browser_signals`，完成或超时后监听立即关闭；不经过外部服务器。
 macOS 在默认浏览器回传失败时会回退到内置 WKWebView，Windows 则保留上次一小时内的有效结果或按中性分计入。
 命令行单跑时不会打开浏览器，浏览器组同样按中性分计入。
@@ -180,18 +186,26 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 
-评分逻辑自测（不联网）：`bash test-claude-check.sh`
+自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`
 
 ## 告警
 
-- 出口 IP 相比上次发生变化 → 通知「出口 IP 变化 A → B」。
+- 出口 IP 连续两次确认发生变化 → 通知「出口 IP 变化 A → B」。
 - 由一致变为不一致 → 通知「⚠️ 出口 IP 异常」；恢复一致 → 通知「出口已恢复正常」。
+- 单次查询失败只显示「网络检测波动」并沿用上次有效结果，不把获取失败当成 IP 变化。
+- 检测进程带互斥锁，慢请求不会与下一轮并发覆盖状态。
 - 仅在状态**真正变化**时提醒，不会每 5 分钟刷屏。
 
 ## 菜单栏图标
 
 点击图标显示：三路 IP、Google 可达性、**谷歌侧时区**、当前系统时区、更新时间；
-并提供「立即检测 / 打开日志 / 退出」。图标含义：🟢 一致　🔴 异常　⚪️ 暂无数据。
+并提供「网络波动图 / 立即检测 / 打开日志 / 退出」。网络波动图包含最近 60 次四路耗时趋势：
+
+- 国内、国外、谷歌侧、Google 各占一行，可直接定位是哪一路失败。
+- 折线表示该路耗时，橙点表示该路获取失败，红线表示已确认的出口 IP 变化。
+- 子菜单同时汇总最近 24 小时各路成功率、失败次数、平均耗时和 IP 变化次数。
+
+图标含义：🟢 一致　🟠 网络波动/复核中　🔴 异常　⚪️ 暂无数据。
 
 ## 打包成 dmg(分发)
 
