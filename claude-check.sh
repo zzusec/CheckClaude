@@ -24,6 +24,7 @@ mkdir -p "$DATA_DIR" 2>/dev/null || true
 STATUS="$DATA_DIR/status"                # auto-timezone.sh 写的三路出口快照
 CSTATUS="$DATA_DIR/claude_status"        # 本脚本写的体检快照(菜单栏 App 读)
 LOG="$DATA_DIR/auto-timezone.log"
+NETWORK_HISTORY="$DATA_DIR/network_history"  # auto-timezone.sh 写入，字段 5 只标记已确认的 IP 变化
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 TZ_SCRIPT="$SELF_DIR/auto-timezone.sh"
 TMP="${TMPDIR:-/tmp}/cc.$$"; mkdir -p "$TMP"
@@ -102,6 +103,8 @@ fetch_all() {
   local ip="$PROBE_IP"
   ( [[ "$ip" != "?" ]] && $CURL "http://ip-api.com/json/${ip}?fields=status,country,countryCode,region,city,isp,org,as,asname,proxy,hosting" >"$TMP/ipapi" 2>/dev/null ) &
   ( [[ "$ip" != "?" ]] && $CURL "https://ipinfo.io/${ip}/json" >"$TMP/ipinfo" 2>/dev/null ) &
+  ( [[ "$ip" != "?" ]] && $CURL "https://ipwho.is/${ip}" >"$TMP/ipwho" 2>/dev/null ) &
+  ( [[ "$ip" != "?" ]] && $CURL "https://api.ip.sb/geoip/${ip}" >"$TMP/ipsb" 2>/dev/null ) &
   ( $CURL "https://www.cloudflare.com/cdn-cgi/trace" >"$TMP/cftrace" 2>/dev/null ) &
   ( curl -s -m 10 -o "$TMP/apibody" -w '%{http_code}' -H 'content-type: application/json' \
       https://api.anthropic.com/v1/messages -d '{}' >"$TMP/apicode" 2>/dev/null ) &
@@ -114,6 +117,10 @@ fetch_all() {
 }
 
 jget() { grep -Eo "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null | head -1 | cut -d'"' -f4; }
+ip_country_code() {
+  local ip="$1"
+  jget <($CURL "http://ip-api.com/json/${ip}?fields=countryCode") countryCode 2>/dev/null
+}
 
 parse_net() {
   COUNTRY=""; COUNTRY_NAME=""; CITY=""; ISP=""; ASN=""; HOSTING=-1; PROXY=0
@@ -123,11 +130,31 @@ parse_net() {
     HOSTING=0; grep -q '"hosting":true' "$TMP/ipapi" && HOSTING=1
     grep -q '"proxy":true' "$TMP/ipapi" && PROXY=1
   fi
-  # 第二家情报源，用于交叉验证(不同厂商对同一 IP 判定不一致 = 该 IP 情报混乱)
-  COUNTRY2=$(jget "$TMP/ipinfo" country)
-  ISP2=$(jget "$TMP/ipinfo" org)
-  if [[ -z "$COUNTRY" && -n "$COUNTRY2" ]]; then
-    COUNTRY="$COUNTRY2"; COUNTRY_NAME="$COUNTRY2"; ISP="$ISP2"
+  # 四家情报源全部查询同一个 PROBE_IP；只比较 ISO 两位国家码，避免把
+  # "US"、"United States"、IPv6 或 CDN 中间节点混成冲突。
+  COUNTRY2=$(jget "$TMP/ipinfo" country); ISP2=$(jget "$TMP/ipinfo" org)
+  COUNTRY3=$(jget "$TMP/ipwho" country_code); ISP3=$(jget "$TMP/ipwho" org)
+  COUNTRY4=$(jget "$TMP/ipsb" country_code); ISP4=$(jget "$TMP/ipsb" organization)
+  COUNTRY=$(printf '%s' "$COUNTRY" | tr '[:lower:]' '[:upper:]')
+  COUNTRY2=$(printf '%s' "$COUNTRY2" | tr '[:lower:]' '[:upper:]')
+  COUNTRY3=$(printf '%s' "$COUNTRY3" | tr '[:lower:]' '[:upper:]')
+  COUNTRY4=$(printf '%s' "$COUNTRY4" | tr '[:lower:]' '[:upper:]')
+  INTEL_SOURCES=""; INTEL_COUNTRIES=""; INTEL_COUNT=0
+  local name cc
+  for name in ip-api ipinfo ipwho ip.sb; do
+    case "$name" in
+      ip-api) cc="$COUNTRY" ;; ipinfo) cc="$COUNTRY2" ;; ipwho) cc="$COUNTRY3" ;; ip.sb) cc="$COUNTRY4" ;;
+    esac
+    [[ "$cc" =~ ^[A-Z]{2}$ ]] || continue
+    INTEL_COUNT=$((INTEL_COUNT + 1))
+    INTEL_SOURCES+="${INTEL_SOURCES:+,}${name}:${cc}"
+    INTEL_COUNTRIES+="${INTEL_COUNTRIES:+ }${cc}"
+  done
+  if [[ -z "$COUNTRY" ]]; then
+    if [[ -n "$COUNTRY2" ]]; then COUNTRY="$COUNTRY2"; COUNTRY_NAME="$COUNTRY2"; ISP="$ISP2"
+    elif [[ -n "$COUNTRY3" ]]; then COUNTRY="$COUNTRY3"; COUNTRY_NAME="$COUNTRY3"; ISP="$ISP3"
+    elif [[ -n "$COUNTRY4" ]]; then COUNTRY="$COUNTRY4"; COUNTRY_NAME="$COUNTRY4"; ISP="$ISP4"
+    fi
   fi
   # Cloudflare 边缘: 你实际落到哪个机房，反映真实网络位置(比 IP 库更难伪造)
   CF_COLO=""; CF_LOC=""; CF_IP=""; CF_WARP=""
@@ -211,7 +238,13 @@ parse_system() {
 # 账号画像里"设备连续性"这一项，网页端做不了(没有历史)，但我们有本地日志。
 parse_stability() {
   IP_CHANGES=0
-  if [[ -f "$LOG" ]]; then
+  if [[ -f "$NETWORK_HISTORY" ]]; then
+    # 新历史的第 5 字段只在连续确认后的真实 IP 变化时为 1；接口失败和恢复复核均为 0。
+    local since_epoch
+    since_epoch=$(( $(date +%s) - 86400 ))
+    IP_CHANGES=$(awk -F'|' -v since="$since_epoch" '$1 >= since && $5 == 1 {n++} END {print n+0}'       "$NETWORK_HISTORY" 2>/dev/null)
+  elif [[ -f "$LOG" ]]; then
+    # 仅给尚未生成 network_history 的老安装保留兼容回退。
     local since
     since=$(date -v-24H '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
     IP_CHANGES=$(awk -v s="[$since]" '$0 >= s && /出口 IP 变化/' "$LOG" 2>/dev/null | wc -l | tr -d ' ')
@@ -228,7 +261,12 @@ parse_stability() {
 # ── 采集: 浏览器信号(菜单栏 App 的隐藏 WKWebView 写的) ──────────
 parse_browser() {
   BR_OK=0; BR_TZ=""; BR_LANGS=""; BR_LOCALE=""; BR_RTC=""; BR_RTC_HOST=""
-  BR_SOURCE=""; BR_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""; BR_UAD_PLAT=""
+  BR_RTC_STATUS=""; BR_RTC_SUPPORTED=""; BR_RTC_CANDIDATES=""; BR_RTC_PUBLIC_COUNT=""
+  BR_RTC_MS=""; BR_RTC_ERROR=""
+  BR_SOURCE=""; BR_UA=""; BR_UA_JS=""; BR_CH_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""
+  BR_UAD_PLAT=""; BR_UAD_BRANDS=""; BR_SF_SITE=""; BR_SF_MODE=""; BR_SF_DEST=""
+  BR_REACH_CLAUDE=""; BR_REACH_CLAUDE_MS=""; BR_REACH_ANTHROPIC=""; BR_REACH_ANTHROPIC_MS=""
+  BR_REACH_API=""; BR_REACH_API_MS=""
   BR_FONTS=""; BR_WEBGL=""; BR_CANVAS=""; BR_AGE=999999
   local f="$DATA_DIR/browser_signals"
   [[ -f "$f" ]] || return 1
@@ -236,9 +274,17 @@ parse_browser() {
   while IFS='=' read -r k v; do
     case "$k" in
       tz) BR_TZ="$v" ;; languages) BR_LANGS="$v" ;; locale) BR_LOCALE="$v" ;;
-      source) BR_SOURCE="$v" ;; ua) BR_UA="$v" ;; ch_platform) BR_CH_PLAT="$v" ;;
-      accept_lang) BR_ACCEPT="$v" ;; uad_platform) BR_UAD_PLAT="$v" ;;
-      rtc_srflx) BR_RTC="$v" ;; rtc_host) BR_RTC_HOST="$v" ;; fonts) BR_FONTS="$v" ;;
+      source) BR_SOURCE="$v" ;; ua) BR_UA="$v" ;; ua_js) BR_UA_JS="$v" ;;
+      ch_ua) BR_CH_UA="$v" ;; ch_platform) BR_CH_PLAT="$v" ;; accept_lang) BR_ACCEPT="$v" ;;
+      uad_platform) BR_UAD_PLAT="$v" ;; uad_brands) BR_UAD_BRANDS="$v" ;;
+      sf_site) BR_SF_SITE="$v" ;; sf_mode) BR_SF_MODE="$v" ;; sf_dest) BR_SF_DEST="$v" ;;
+      reach_claude) BR_REACH_CLAUDE="$v" ;; reach_claude_ms) BR_REACH_CLAUDE_MS="$v" ;;
+      reach_anthropic) BR_REACH_ANTHROPIC="$v" ;; reach_anthropic_ms) BR_REACH_ANTHROPIC_MS="$v" ;;
+      reach_api) BR_REACH_API="$v" ;; reach_api_ms) BR_REACH_API_MS="$v" ;;
+      rtc_srflx) BR_RTC="$v" ;; rtc_host) BR_RTC_HOST="$v" ;; rtc_status) BR_RTC_STATUS="$v" ;;
+      rtc_supported) BR_RTC_SUPPORTED="$v" ;; rtc_candidate_count) BR_RTC_CANDIDATES="$v" ;;
+      rtc_public_count) BR_RTC_PUBLIC_COUNT="$v" ;; rtc_elapsed_ms) BR_RTC_MS="$v" ;;
+      rtc_err) BR_RTC_ERROR="$v" ;; fonts) BR_FONTS="$v" ;;
       webgl) BR_WEBGL="$v" ;; canvas) BR_CANVAS="$v" ;;
     esac
   done <"$f"
@@ -266,6 +312,7 @@ parse_claude() {
 # ── 打分: 26 项加权信号，合计 100 ───────────────────────────────
 compute_score() {
   SIGNALS=(); SCORE=0; ISSUES=""; FIXES=""; FIXABLE_TZ=""; FIXABLE_LOCALE=""
+  BR_HEADER_INTEGRITY="unknown"
   local relay=0
   [[ -n "$CLAUDE_BASE" && "$CLAUDE_BASE" != *"api.anthropic.com"* ]] && relay=1
 
@@ -314,16 +361,24 @@ compute_score() {
     *)               sig 出口 "anthropic.com 可达" 2 60 "HTTP $SITE_CODE" ;;
   esac
 
-  # 两家 IP 情报库对同一 IP 的判定是否一致
-  if [[ -n "$COUNTRY" && -n "$COUNTRY2" ]]; then
-    if [[ "$COUNTRY" == "$COUNTRY2" ]]; then
-      sig 出口 "多源情报一致" 3 100 "$COUNTRY = $COUNTRY2"
-    else
-      sig 出口 "多源情报一致" 3 0 "$COUNTRY ≠ $COUNTRY2" \
-        "两家 IP 情报库对该出口判定不一致(${COUNTRY} vs ${COUNTRY2})，属于画像混乱的 IP" "换一个情报干净、归属明确的节点"
-    fi
+  # 多源情报一致性：只比较针对同一个 PROBE_IP 返回的 ISO 国家码。
+  local intel_codes="" intel_count=0 intel_unique=0 raw_cc norm_cc intel_display=""
+  for raw_cc in "${COUNTRY:-}" "${COUNTRY2:-}" "${COUNTRY3:-}" "${COUNTRY4:-}"; do
+    norm_cc=$(printf '%s' "$raw_cc" | tr '[:lower:]' '[:upper:]')
+    [[ "$norm_cc" =~ ^[A-Z]{2}$ ]] || continue
+    intel_codes+="${intel_codes:+$'\n'}${norm_cc}"
+    intel_display+="${intel_display:+ / }${norm_cc}"
+    intel_count=$((intel_count + 1))
+  done
+  [[ -n "$intel_codes" ]] && intel_unique=$(printf '%s\n' "$intel_codes" | sort -u | grep -c . | tr -d ' ')
+  if [[ $intel_count -ge 2 && $intel_unique -eq 1 ]]; then
+    sig 出口 "多源情报一致" 3 100 "${intel_count}/4 · ${intel_display%% / *}"
+  elif [[ $intel_count -ge 2 ]]; then
+    sig 出口 "多源情报一致" 3 0 "${intel_count}/4 · ${intel_display}"       "多家 IP 情报库对同一出口 ${PROBE_IP} 的国家码判定不一致(${intel_display})" "换一个情报干净、归属明确的节点"
+  elif [[ $intel_count -eq 1 ]]; then
+    sig 出口 "多源情报一致" 3 50 "仅 1/4 来源可用 · ${intel_display}"
   else
-    sig 出口 "多源情报一致" 3 50 "数据不足"
+    sig 出口 "多源情报一致" 3 50 "0/4 · 数据不足"
   fi
 
   # IPv6 出口: 没有最省心，有就必须和 IPv4 出口同地区，否则等于开了个后门
@@ -502,20 +557,41 @@ compute_score() {
     sig 浏览器 "HTTP 语言首标" 1 100 "未采集"
     sig 浏览器 "渲染环境" 2 70 "未采集"
   else
-    # WebRTC 走 UDP，不经过 HTTP 代理，能暴露代理没兜住的真实出口
-    if [[ -z "$BR_RTC" ]]; then
-      sig 浏览器 "WebRTC 出口" 6 100 "无泄漏(未拿到公网候选)"
-    elif [[ "$BR_RTC" == *"$PROBE_IP"* ]]; then
-      sig 浏览器 "WebRTC 出口" 6 100 "$BR_RTC = 出口"
-    else
-      # 泄漏出来的 IP 属于哪个地区，决定这次泄漏有多要命
-      local leak_n leak_cc
-      leak_n=$(echo "$BR_RTC" | awk -F, '{print NF}')
-      leak_cc=$(jget <($CURL "http://ip-api.com/json/${BR_RTC%%,*}?fields=countryCode") countryCode 2>/dev/null)
-      sig 浏览器 "WebRTC 出口" 6 0 "${leak_n} 个泄漏 · ${leak_cc:-?} ≠ $COUNTRY" \
-        "WebRTC 暴露了 ${leak_n} 个非代理出口(首个 ${BR_RTC%%,*}${leak_cc:+，归属 $leak_cc})，UDP 绕过了代理" \
-        "代理开 TUN 全局(接管 UDP)，或在浏览器里禁用 WebRTC"
-    fi
+    # WebRTC 走 UDP，不经过 HTTP 代理。只有检测明确完成时，“无公网候选”才算安全；
+    # 超时/异常/不支持按未知处理，避免原来把 STUN 失败直接当成满分。
+    case "${BR_RTC_STATUS:-}" in
+      none)
+        sig 浏览器 "WebRTC 出口" 6 100 "检测完成，无公网候选"
+        ;;
+      timeout|error|unsupported|collecting|"")
+        local rtc_desc
+        case "${BR_RTC_STATUS:-}" in
+          timeout|collecting|"") rtc_desc="检测超时" ;;
+          error) rtc_desc="检测异常${BR_RTC_ERROR:+：${BR_RTC_ERROR}}" ;;
+          unsupported) rtc_desc="浏览器不支持或已禁用" ;;
+        esac
+        sig 浏览器 "WebRTC 出口" 6 70 "$rtc_desc" \
+          "WebRTC 出口未能完成检测，暂时无法确认 UDP 是否被代理接管" \
+          "确认浏览器允许 WebRTC，并检查代理是否接管 UDP"
+        ;;
+      ok)
+        if [[ -z "$BR_RTC" ]]; then
+          sig 浏览器 "WebRTC 出口" 6 70 "已完成但没有公网候选数据"
+        elif [[ "$BR_RTC" == *"$PROBE_IP"* ]]; then
+          sig 浏览器 "WebRTC 出口" 6 100 "$BR_RTC = 出口"
+        else
+          local leak_n leak_cc
+          leak_n=${BR_RTC_PUBLIC_COUNT:-$(echo "$BR_RTC" | awk -F, '{print NF}')}
+          leak_cc=$(ip_country_code "${BR_RTC%%,*}")
+          sig 浏览器 "WebRTC 出口" 6 0 "${leak_n} 个泄漏 · ${leak_cc:-?} ≠ $COUNTRY" \
+            "WebRTC 暴露了 ${leak_n} 个非代理出口(首个 ${BR_RTC%%,*}${leak_cc:+，归属 $leak_cc})，UDP 绕过了代理" \
+            "代理开 TUN 全局(接管 UDP)，或在浏览器里禁用 WebRTC"
+        fi
+        ;;
+      *)
+        sig 浏览器 "WebRTC 出口" 6 70 "未知状态 ${BR_RTC_STATUS}"
+        ;;
+    esac
 
     if [[ "$BR_TZ" == "$SYS_TZ" ]]; then
       sig 浏览器 "浏览器时区" 3 100 "$BR_TZ$([[ "$BR_SOURCE" == browser ]] && echo " (真实浏览器)")"
@@ -543,28 +619,51 @@ compute_score() {
         "浏览器 Intl 区域 ${BR_LOCALE} 与出口 ${COUNTRY} 不对应"
     fi
 
-    # Client Hints(Chromium 独有): 平台标识要和真实系统对得上，对不上说明 UA 被改过或在异常容器里
-    local ch_plat="${BR_CH_PLAT:-$BR_UAD_PLAT}" os_kind="macOS"
+    # 请求头完整性：把服务端实际收到的 UA / Accept-Language / Client Hints
+    # 与 JavaScript 读取值、真实系统和出口地区交叉核对。Safari/Firefox 没有 UA-CH 属正常。
+    local ch_plat="${BR_CH_PLAT:-$BR_UAD_PLAT}" brands="${BR_UAD_BRANDS:-$BR_CH_UA}"
+    local os_kind="macOS" ua_kind="" ua_probe="${BR_UA:-$BR_UA_JS}"
     [[ "$OS_VER" == Windows* ]] && os_kind="Windows"
+    case "$ua_probe" in
+      *Windows*) ua_kind="Windows" ;; *Macintosh*|*Mac\ OS*) ua_kind="macOS" ;;
+      *Android*) ua_kind="Android" ;; *iPhone*|*iPad*) ua_kind="iOS" ;; *Linux*) ua_kind="Linux" ;;
+    esac
     if [[ "$BR_SOURCE" != "browser" ]]; then
-      sig 浏览器 "Client Hints" 2 70 "内置引擎未采集"
+      BR_HEADER_INTEGRITY="partial"
+      sig 浏览器 "Client Hints" 2 70 "内置引擎未采集请求头"
+    elif [[ -n "$BR_UA" && -n "$BR_UA_JS" && "$BR_UA" != "$BR_UA_JS" ]]; then
+      BR_HEADER_INTEGRITY="conflict"
+      sig 浏览器 "Client Hints" 2 0 "HTTP UA ≠ JS UA"         "浏览器请求头 User-Agent 与 JavaScript 读取值不一致，可能存在不完整的 UA 伪装"         "关闭修改 UA/指纹的扩展，使用原生浏览器配置"
+    elif [[ -n "$ua_kind" && "$ua_kind" != "$os_kind" ]]; then
+      BR_HEADER_INTEGRITY="conflict"
+      sig 浏览器 "Client Hints" 2 0 "UA ${ua_kind} ≠ 系统 ${os_kind}"         "浏览器 User-Agent 显示 ${ua_kind}，但真实系统是 ${os_kind}"         "关闭修改 UA 的扩展，使用原生浏览器登录"
+    elif [[ -n "$ch_plat" && "$ch_plat" != *"$os_kind"* ]]; then
+      BR_HEADER_INTEGRITY="conflict"
+      sig 浏览器 "Client Hints" 2 0 "$ch_plat ≠ $os_kind"         "浏览器上报的平台 ${ch_plat} 与真实系统 ${os_kind} 不符，UA 被改过或运行在异常容器中"         "关闭修改 UA 的扩展，使用原生浏览器登录"
+    elif [[ "$ua_probe" == *Chrome* || "$ua_probe" == *Chromium* || "$ua_probe" == *Edg/* ]] &&          [[ -n "$brands" && "$brands" != *Chromium* && "$brands" != *Chrome* && "$brands" != *Edge* ]]; then
+      BR_HEADER_INTEGRITY="conflict"
+      sig 浏览器 "Client Hints" 2 25 "Chromium UA 与 brands 不一致"         "浏览器 UA 显示 Chromium 系，但 Client Hints brands 不对应"         "关闭浏览器指纹伪装或 UA 修改扩展"
     elif [[ -z "$ch_plat" ]]; then
+      BR_HEADER_INTEGRITY="ok"
       sig 浏览器 "Client Hints" 2 100 "Safari/Firefox 不提供"
-    elif [[ "$ch_plat" == *"$os_kind"* ]]; then
-      sig 浏览器 "Client Hints" 2 100 "$ch_plat"
     else
-      sig 浏览器 "Client Hints" 2 0 "$ch_plat ≠ $os_kind" \
-        "浏览器上报的平台 ${ch_plat} 与真实系统 ${os_kind} 不符，UA 被改过或运行在异常容器中" \
-        "关掉浏览器里改 UA 的插件，用原生浏览器登录"
+      BR_HEADER_INTEGRITY="ok"
+      sig 浏览器 "Client Hints" 2 100 "$ch_plat${brands:+ · ${brands:0:22}}"
     fi
 
-    # HTTP Accept-Language 首标: 服务端第一眼看到的语言偏好，比 JS 里的 navigator 更早暴露
+    # HTTP Accept-Language 是服务端最先看到的语言；先与 JS navigator.languages
+    # 交叉核对，再检查是否与出口国家明显冲突。
+    local accept_first="${BR_ACCEPT%%,*}" js_first="${BR_LANGS%%,*}" accept_base js_base
+    accept_first="${accept_first%%;*}"
+    accept_base=$(printf '%s' "${accept_first%%-*}" | tr '[:upper:]' '[:lower:]')
+    js_base=$(printf '%s' "${js_first%%-*}" | tr '[:upper:]' '[:lower:]')
     if [[ "$BR_SOURCE" != "browser" || -z "$BR_ACCEPT" ]]; then
       sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:-未采集}"
+    elif [[ -n "$accept_base" && -n "$js_base" && "$accept_base" != "$js_base" ]]; then
+      BR_HEADER_INTEGRITY="conflict"
+      sig 浏览器 "HTTP 语言首标" 1 0 "$accept_first ≠ $js_first"         "HTTP Accept-Language 与 navigator.languages 首选语言不一致，浏览器画像存在矛盾"         "统一浏览器首选语言，并关闭修改请求头的扩展"
     elif [[ -n "$COUNTRY" && "$BR_ACCEPT" == zh* ]] && ! in_list "$COUNTRY" "CN HK TW MO SG"; then
-      sig 浏览器 "HTTP 语言首标" 1 0 "$BR_ACCEPT vs $COUNTRY" \
-        "请求头 Accept-Language: ${BR_ACCEPT} 与出口 ${COUNTRY} 矛盾，服务端第一眼就能看到" \
-        "浏览器设置里把首选语言调成 English (United States)"
+      sig 浏览器 "HTTP 语言首标" 1 0 "$BR_ACCEPT vs $COUNTRY"         "请求头 Accept-Language: ${BR_ACCEPT} 与出口 ${COUNTRY} 矛盾，服务端第一眼就能看到"         "浏览器设置里把首选语言调成 English (United States)"
     else
       sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:0:24}"
     fi
@@ -588,7 +687,12 @@ compute_score() {
   for row in "${SIGNALS[@]}"; do
     IFS='~' read -r cg cl cw cp cv <<<"$row"
     case "$CRITICAL" in
-      *"|$cl|"*) [[ ${cp:-0} -lt ${cw:-0} ]] && crit_fail+="${crit_fail:+、}$cl" ;;
+      *"|$cl|"*)
+        if [[ "$cl" == "WebRTC 出口" ]]; then
+          [[ ${cp:-0} -eq 0 ]] && crit_fail+="${crit_fail:+、}$cl"
+        else
+          [[ ${cp:-0} -lt ${cw:-0} ]] && crit_fail+="${crit_fail:+、}$cl"
+        fi ;;
     esac
   done
 
@@ -861,12 +965,20 @@ write_cstatus() {
     echo "ip=${PROBE_IP}"; echo "country=${COUNTRY:-?}"; echo "countryname=${COUNTRY_NAME:-?}"
     echo "city=${CITY:-?}"; echo "isp=${ISP:-?}"; echo "asn=${ASN:-?}"; echo "iptype=$iptype"
     echo "colo=${CF_COLO:-?}"; echo "api=${API_CODE}"; echo "web=${WEB_CODE}"
+    echo "intelsources=${INTEL_SOURCES:-未采集}"; echo "intelcount=${INTEL_COUNT:-0}"
     echo "consistent=${CONSISTENT}"; echo "systz=${SYS_TZ}"; echo "iptz=${GFW_TZ:-?}"
     echo "tzoffset=${TZ_OFFSET} ${TZ_ABBR}"; echo "locale=${SYS_LOCALE:-?}"; echo "langs=${SYS_LANGS:-?}"
     echo "os=${OS_VER}"; echo "proxymode=${PROXY_MODE}"
     echo "vmhost=${VM_HOST}"; echo "ipchanges=${IP_CHANGES}"
     echo "brtz=${BR_TZ:-未采集}"; echo "brlangs=${BR_LANGS:-未采集}"
-    echo "brrtc=${BR_RTC:-无}"; echo "brfonts=${BR_FONTS:-?}"; echo "brwebgl=${BR_WEBGL:-?}"
+    echo "brrtc=${BR_RTC:-无}"; echo "brrtcstatus=${BR_RTC_STATUS:-未采集}"
+    echo "brrtccandidates=${BR_RTC_CANDIDATES:-0}"; echo "brrtcpublic=${BR_RTC_PUBLIC_COUNT:-0}"
+    echo "brrtcms=${BR_RTC_MS:-}"; echo "brfonts=${BR_FONTS:-?}"; echo "brwebgl=${BR_WEBGL:-?}"
+    echo "brclaude=${BR_REACH_CLAUDE:-未采集}"; echo "brclaudems=${BR_REACH_CLAUDE_MS:-}"
+    echo "branthropic=${BR_REACH_ANTHROPIC:-未采集}"; echo "branthropicms=${BR_REACH_ANTHROPIC_MS:-}"
+    echo "brapi=${BR_REACH_API:-未采集}"; echo "brapims=${BR_REACH_API_MS:-}"
+    echo "brheaders=${BR_HEADER_INTEGRITY:-unknown}"
+    echo "brfetch=${BR_SF_SITE:-?}/${BR_SF_MODE:-?}/${BR_SF_DEST:-?}"
     echo "dns=${DNS_SCOPE}"; echo "dnsresult=${DNS_VERDICT}"
     echo "claudever=${CLAUDE_VER:-未安装}"; echo "base=${CLAUDE_BASE:-官方}"
     echo "fixable=$( [[ -n "$(fixable_list)" ]] && echo 1 || echo 0 )"
@@ -895,11 +1007,13 @@ print_report() {
   done
   echo ""
   echo "  出口 ${PROBE_IP} · ${COUNTRY_NAME:-?} ${CITY:-} · ${ISP:-?} · ${ASN:-?}"
+  echo "  情报 ${INTEL_SOURCES:-未采集}"
   echo "  系统 ${OS_VER} · ${SYS_LOCALE:-?} · ${SYS_TZ} · ${PROXY_MODE} · ${VM_HOST}"
   echo "  DNS  ${DNS_SCOPE} · claude.ai → ${DNS_VERDICT}"
   echo "  CLI  ${CLAUDE_VER:-未检测到} · 接口 ${CLAUDE_BASE:-官方}"
   if [[ "$BR_OK" == "1" ]]; then
-    echo "  浏览 ${BR_TZ} · ${BR_LANGS} · WebRTC ${BR_RTC:-无泄漏} · ${BR_FONTS:-无中文字体}"
+    echo "  浏览 ${BR_TZ} · ${BR_LANGS} · WebRTC ${BR_RTC_STATUS:-未采集}${BR_RTC:+/${BR_RTC}} · 候选 ${BR_RTC_CANDIDATES:-0} · ${BR_FONTS:-无中文字体}"
+    echo "  浏览器访问 claude.ai ${BR_REACH_CLAUDE:-未采集}${BR_REACH_CLAUDE_MS:+/${BR_REACH_CLAUDE_MS}ms} · anthropic.com ${BR_REACH_ANTHROPIC:-未采集}${BR_REACH_ANTHROPIC_MS:+/${BR_REACH_ANTHROPIC_MS}ms} · API ${BR_REACH_API:-未采集}${BR_REACH_API_MS:+/${BR_REACH_API_MS}ms}"
   else
     echo "  浏览 未采集(浏览器信号由菜单栏 App 的隐藏 WebView 提供，命令行单跑时没有)"
   fi

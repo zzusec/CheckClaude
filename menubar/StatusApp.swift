@@ -22,6 +22,7 @@ let statusPath = (baseDir as NSString).appendingPathComponent("status")
 let claudeStatusPath = (baseDir as NSString).appendingPathComponent("claude_status")
 let browserPath = (baseDir as NSString).appendingPathComponent("browser_signals")
 let logPath = (baseDir as NSString).appendingPathComponent("auto-timezone.log")
+let networkHistoryPath = (baseDir as NSString).appendingPathComponent("network_history")
 // 检测脚本: 优先用 App 包内 Resources 里的，开发时回退到源码目录
 func script(_ name: String) -> String {
     Bundle.main.path(forResource: name, ofType: "sh")
@@ -33,15 +34,334 @@ let upgradeScriptPath = script("upgrade")
 let updatePath = (baseDir as NSString).appendingPathComponent("update_status")
 let upgradeStatePath = (baseDir as NSString).appendingPathComponent("upgrade_state")
 
+struct NetworkHistoryPoint {
+    let timestamp: TimeInterval
+    let totalSeconds: Double
+    let result: String
+    let ip: String
+    let ipChanged: Bool
+    let cnSeconds: Double
+    let cnOK: Bool
+    let intlSeconds: Double
+    let intlOK: Bool
+    let gfwSeconds: Double
+    let gfwOK: Bool
+    let googleSeconds: Double
+    let googleOK: Bool
+
+    func seconds(for route: NetworkRoute) -> Double {
+        switch route {
+        case .cn: return cnSeconds
+        case .intl: return intlSeconds
+        case .gfw: return gfwSeconds
+        case .google: return googleSeconds
+        }
+    }
+
+    func succeeded(_ route: NetworkRoute) -> Bool {
+        switch route {
+        case .cn: return cnOK
+        case .intl: return intlOK
+        case .gfw: return gfwOK
+        case .google: return googleOK
+        }
+    }
+}
+
+enum NetworkRoute: CaseIterable {
+    case cn, intl, gfw, google
+
+    var title: String {
+        switch self {
+        case .cn: return "国内"
+        case .intl: return "国外"
+        case .gfw: return "谷歌侧"
+        case .google: return "Google"
+        }
+    }
+
+    var color: NSColor {
+        switch self {
+        case .cn: return .systemBlue
+        case .intl: return .systemTeal
+        case .gfw: return .systemPurple
+        case .google: return .systemGreen
+        }
+    }
+}
+
+// NSMenu 没有原生图表控件，用一个只读 NSView 画四路小趋势图。
+// 每一路独立折线，能直接看出是国内、国外、谷歌侧还是 Google 连通性在失败。
+final class NetworkHistoryView: NSView {
+    private let points: [NetworkHistoryPoint]
+
+    init(points: [NetworkHistoryPoint]) {
+        self.points = points
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: 350, height: 116)))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(accessibilitySummary())
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { false }
+
+    private func accessibilitySummary() -> String {
+        guard !points.isEmpty else { return "网络波动图，暂无历史数据" }
+        let routeText = NetworkRoute.allCases.map { route in
+            let failures = points.filter { !$0.succeeded(route) }.count
+            return "\(route.title)失败\(failures)次"
+        }.joined(separator: "，")
+        let changes = points.filter(\.ipChanged).count
+        return "最近\(points.count)次网络检测，\(routeText)，确认换IP\(changes)次"
+    }
+
+    private func drawText(_ text: String, at point: NSPoint, font: NSFont, color: NSColor) {
+        (text as NSString).draw(at: point, withAttributes: [.font: font, .foregroundColor: color])
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let titleFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .medium)
+        let noteFont = NSFont.systemFont(ofSize: 9)
+        drawText("最近 \(points.count) 次分路趋势", at: NSPoint(x: 8, y: 5),
+                 font: titleFont, color: .labelColor)
+
+        guard !points.isEmpty else {
+            drawText("暂无历史数据，完成一次出口检测后显示", at: NSPoint(x: 52, y: bounds.midY - 7),
+                     font: NSFont.systemFont(ofSize: 11), color: .secondaryLabelColor)
+            return
+        }
+
+        let left: CGFloat = 54
+        let right: CGFloat = 10
+        let top: CGFloat = 24
+        let rowHeight: CGFloat = 18.5
+        let plotWidth = max(1, bounds.width - left - right)
+        let plotBottom = top + rowHeight * CGFloat(NetworkRoute.allCases.count)
+
+        func xPosition(_ index: Int) -> CGFloat {
+            guard points.count > 1 else { return left + plotWidth }
+            return left + CGFloat(index) * plotWidth / CGFloat(points.count - 1)
+        }
+
+        // 已确认的换 IP 用贯穿四路的红线标记，和单路接口失败区分开。
+        NSColor.systemRed.withAlphaComponent(0.55).setStroke()
+        for (index, point) in points.enumerated() where point.ipChanged {
+            let x = xPosition(index)
+            let marker = NSBezierPath()
+            marker.move(to: NSPoint(x: x, y: top))
+            marker.line(to: NSPoint(x: x, y: plotBottom))
+            marker.lineWidth = 1.2
+            marker.stroke()
+        }
+
+        for (routeIndex, route) in NetworkRoute.allCases.enumerated() {
+            let rowTop = top + CGFloat(routeIndex) * rowHeight
+            let rowBottom = rowTop + rowHeight - 4
+            let baseline = NSBezierPath()
+            baseline.move(to: NSPoint(x: left, y: rowBottom))
+            baseline.line(to: NSPoint(x: left + plotWidth, y: rowBottom))
+            NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
+            baseline.lineWidth = 0.5
+            baseline.stroke()
+
+            drawText(route.title, at: NSPoint(x: 8, y: rowTop + 3), font: labelFont, color: route.color)
+
+            let successfulDurations = points.filter { $0.succeeded(route) }.map { max(0.5, $0.seconds(for: route)) }.sorted()
+            let percentileIndex = max(0, Int(Double(max(0, successfulDurations.count - 1)) * 0.95))
+            let p95 = successfulDurations.isEmpty ? 1 : successfulDurations[percentileIndex]
+            let maxScale = max(1, p95 * 1.25)
+            let amplitude = max(3, rowHeight - 8)
+            let path = NSBezierPath()
+            var previousSucceeded = false
+
+            for (index, point) in points.enumerated() {
+                let x = xPosition(index)
+                if point.succeeded(route) {
+                    let value = min(maxScale, max(0.5, point.seconds(for: route)))
+                    let y = rowBottom - CGFloat(value / maxScale) * amplitude
+                    if previousSucceeded { path.line(to: NSPoint(x: x, y: y)) }
+                    else { path.move(to: NSPoint(x: x, y: y)) }
+                    let dot = NSBezierPath(ovalIn: NSRect(x: x - 1.2, y: y - 1.2, width: 2.4, height: 2.4))
+                    route.color.setFill()
+                    dot.fill()
+                    previousSucceeded = true
+                } else {
+                    previousSucceeded = false
+                    let dot = NSBezierPath(ovalIn: NSRect(x: x - 2.2, y: rowBottom - amplitude / 2 - 2.2, width: 4.4, height: 4.4))
+                    NSColor.systemOrange.setFill()
+                    dot.fill()
+                }
+            }
+            route.color.withAlphaComponent(0.9).setStroke()
+            path.lineWidth = 1.25
+            path.lineJoinStyle = .round
+            path.lineCapStyle = .round
+            path.stroke()
+        }
+
+        drawText("折线=耗时   橙点=该路失败   红线=已确认换 IP",
+                 at: NSPoint(x: left, y: plotBottom + 3), font: noteFont, color: .secondaryLabelColor)
+    }
+}
+
+// 非模态新版提示：不抢走当前窗口焦点，用户可直接在线更新并自动重启。
+// 视觉层级参考桌面软件常见的右下角更新卡片，但保持 macOS 原生材质和控件行为。
+final class UpdateToastController: NSObject {
+    private var panel: NSPanel!
+    private let onUpgrade: () -> Void
+    private let onDismiss: () -> Void
+
+    init(current: String, latest: String, onUpgrade: @escaping () -> Void,
+         onDismiss: @escaping () -> Void) {
+        self.onUpgrade = onUpgrade
+        self.onDismiss = onDismiss
+        super.init()
+
+        let size = NSSize(width: 360, height: 112)
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        p.level = .floating
+        p.isFloatingPanel = true
+        p.hidesOnDeactivate = false
+        p.becomesKeyOnlyIfNeeded = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.isMovableByWindowBackground = true
+        panel = p
+
+        let root = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        root.material = .popover
+        root.blendingMode = .behindWindow
+        root.state = .active
+        root.wantsLayer = true
+        root.layer?.cornerRadius = 14
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.65).cgColor
+        root.setAccessibilityElement(true)
+        root.setAccessibilityRole(.group)
+        root.setAccessibilityLabel("发现 CheckClaude 新版本 v\(latest)")
+        p.contentView = root
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
+                             accessibilityDescription: "发现新版本")
+        icon.contentTintColor = .systemGreen
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 23, weight: .medium)
+
+        let title = NSTextField(labelWithString: "发现新版本 v\(latest)")
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.textColor = .labelColor
+
+        let body = NSTextField(wrappingLabelWithString:
+            "当前 v\(current)，在线安装后自动重启。")
+        body.translatesAutoresizingMaskIntoConstraints = false
+        body.font = .systemFont(ofSize: 12)
+        body.textColor = .secondaryLabelColor
+        body.maximumNumberOfLines = 2
+
+        let update = NSButton(title: "立即更新", target: self, action: #selector(upgradeNow))
+        update.translatesAutoresizingMaskIntoConstraints = false
+        update.bezelStyle = .rounded
+        update.controlSize = .small
+        update.contentTintColor = .systemGreen
+        update.keyEquivalent = "\r"
+        update.setAccessibilityLabel("立即更新到 v\(latest) 并重启 CheckClaude")
+
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark",
+                                             accessibilityDescription: "关闭")!,
+                             target: self, action: #selector(closeToast))
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.isBordered = false
+        close.contentTintColor = .secondaryLabelColor
+        close.setAccessibilityLabel("稍后提醒")
+
+        [icon, title, body, update, close].forEach(root.addSubview)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            icon.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            icon.widthAnchor.constraint(equalToConstant: 26),
+            icon.heightAnchor.constraint(equalToConstant: 26),
+
+            close.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11),
+            close.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+            close.widthAnchor.constraint(equalToConstant: 20),
+            close.heightAnchor.constraint(equalToConstant: 20),
+
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -10),
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 15),
+
+            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+
+            update.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            update.topAnchor.constraint(greaterThanOrEqualTo: body.bottomAnchor, constant: 7),
+            update.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            update.widthAnchor.constraint(greaterThanOrEqualToConstant: 88)
+        ])
+    }
+
+    func show() {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        // macOS 通知习惯位于右上角：贴近菜单栏下方，同时避开安全区域。
+        let finalOrigin = NSPoint(x: visible.maxX - panel.frame.width - 22,
+                                  y: visible.maxY - panel.frame.height - 14)
+        panel.setFrameOrigin(NSPoint(x: finalOrigin.x, y: finalOrigin.y + 14))
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrameOrigin(finalOrigin)
+        }
+    }
+
+    func dismiss() {
+        guard panel.isVisible else { onDismiss(); return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.panel.orderOut(nil)
+            self.onDismiss()
+        })
+    }
+
+    @objc private func upgradeNow() {
+        panel.orderOut(nil)
+        onDismiss()
+        onUpgrade()
+    }
+
+    @objc private func closeToast() { dismiss() }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var uiTimer: Timer?
     var scanTimer: Timer?
+    var scanProcess: Process?   // 同一时间只允许一个出口检测，避免旧结果覆盖新结果
     var lastExitIP = ""      // 出口 IP 变化时才重跑 Claude 环境体检
     var probe: BrowserProbe?
     var bridge: BrowserBridge?
     var phase: String?          // 非 nil = 正在检测(内部分两步，不暴露给用户)
     var updateTimer: Timer?
+    var updateToast: UpdateToastController?
 
     func applicationDidFinishLaunching(_ n: Notification) {
         // 上次升级若被 kickstart 打断，状态文件可能残留，启动时先清掉
@@ -51,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.behavior = .removalAllowed
         refresh()
         notify("CheckClaude已启动", "图标在屏幕右上角菜单栏 🌐，点击查看出口IP与时区")
-        runScript(["--once"])            // 启动即检测一次
+        runScript(["--once"], isScan: true) // 启动即检测一次
         // 每 30 秒读快照刷新显示
         uiTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -59,9 +379,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 定时主动检测(默认 1 分钟，可在菜单"检测间隔"调整)
         startScanTimer()
         // 版本检查: 启动时一次，之后每 2 小时。GitHub API 匿名限额 60 次/小时，这个频率很安全
-        runScript(["--check"], upgradeScriptPath)
+        runScript(["--check"], upgradeScriptPath) { [weak self] in self?.refresh() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in
-            self?.runScript(["--check"], upgradeScriptPath)
+            guard let self else { return }
+            self.runScript(["--check"], upgradeScriptPath) { [weak self] in self?.refresh() }
         }
     }
 
@@ -74,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func startScanTimer() {
         scanTimer?.invalidate()
         scanTimer = Timer.scheduledTimer(withTimeInterval: scanInterval(), repeats: true) { [weak self] _ in
-            self?.runScript(["--once"])
+            self?.runScript(["--once"], isScan: true)
         }
     }
 
@@ -84,17 +405,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    func runScript(_ args: [String], _ path: String = scriptPath, then: (() -> Void)? = nil) {
+    func runScript(_ args: [String], _ path: String = scriptPath, isScan: Bool = false, then: (() -> Void)? = nil) {
+        // 定时器、启动检测和“立即检测”可能同时触发。出口检测只保留一个进程；
+        // shell 侧还有跨进程锁，防止 launchd 或其它入口与 App 竞争写状态。
+        if isScan, scanProcess != nil { return }
+
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [path] + args
         var env = ProcessInfo.processInfo.environment
         env["AUTO_TZ_DIR"] = baseDir   // 与脚本共用同一数据目录
         p.environment = env
+        if isScan { scanProcess = p }
         p.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async { self?.refresh(); then?() }
+            DispatchQueue.main.async {
+                if isScan { self?.scanProcess = nil }
+                self?.refresh()
+                then?()
+            }
         }
-        try? p.run()
+        do {
+            try p.run()
+        } catch {
+            if isScan { scanProcess = nil }
+            refresh()
+            then?()
+        }
     }
 
     func notify(_ title: String, _ msg: String) {
@@ -115,9 +451,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return d
     }
 
+    func readNetworkHistory() -> [NetworkHistoryPoint] {
+        guard let txt = try? String(contentsOfFile: networkHistoryPath, encoding: .utf8) else { return [] }
+        let now = Date().timeIntervalSince1970
+        let cutoff = now - 24 * 3600
+        return txt.split(separator: "\n").compactMap { line in
+            let f = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 13,
+                  let timestamp = TimeInterval(f[0]), timestamp >= cutoff, timestamp <= now + 300,
+                  let total = Double(f[1]),
+                  let cnSeconds = Double(f[5]), let cnOK = Int(f[6]),
+                  let intlSeconds = Double(f[7]), let intlOK = Int(f[8]),
+                  let gfwSeconds = Double(f[9]), let gfwOK = Int(f[10]),
+                  let googleSeconds = Double(f[11]), let googleOK = Int(f[12]) else { return nil }
+            return NetworkHistoryPoint(timestamp: timestamp, totalSeconds: total, result: f[2], ip: f[3],
+                                       ipChanged: f[4] == "1",
+                                       cnSeconds: cnSeconds, cnOK: cnOK == 1,
+                                       intlSeconds: intlSeconds, intlOK: intlOK == 1,
+                                       gfwSeconds: gfwSeconds, gfwOK: gfwOK == 1,
+                                       googleSeconds: googleSeconds, googleOK: googleOK == 1)
+        }.sorted { $0.timestamp < $1.timestamp }
+    }
+
     func refresh() {
         let s = readStatus()
         let consistent = s["consistent"] ?? ""
+        let network = s["network"] ?? "ok"   // 旧版快照没有该字段，按稳定处理
+        let history = readNetworkHistory()
         let tz = s["tz"] ?? "?"
 
         // 矢量图标(SF Symbol) + 状态色 + 出口时区城市名，确保在菜单栏可见
@@ -130,14 +490,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 光看 IP 一致但分数掉到 60 分，图标还是绿的，等于没提醒。
         let cs = readStatus(claudeStatusPath)
         let claudeScore = Int(cs["score"] ?? "") ?? -1
-        let safe = claudeScore >= 90 && consistent == "1"
-        alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
+        let safe = claudeScore >= 90 && consistent == "1" && network == "ok"
+        // 网络结果还在复核时不改变安全档位，也不发送“不可用/恢复”通知。
+        if network == "ok" {
+            alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
+        }
 
         if let btn = item.button {
             // 综合判定: 安全=绿勾 / 有隐患=黄感叹号 / 不建议使用=红叉 / 无数据=灰问号
             let symName: String
             let color: NSColor
             if claudeScore < 0 && s.isEmpty { symName = "questionmark.circle"; color = .systemGray }
+            else if network != "ok" { symName = "exclamationmark.triangle.fill"; color = .systemOrange }
             else if safe { symName = "checkmark.circle.fill"; color = .systemGreen }
             else if claudeScore >= 70 && consistent == "1" { symName = "exclamationmark.triangle.fill"; color = .systemOrange }
             else { symName = "xmark.circle.fill"; color = .systemRed }
@@ -162,8 +526,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(colored("⬆ 正在升级：\(up)", .labelColor))
             menu.addItem(.separator())
         }
-        let head = consistent == "1" ? "出口 IP 一致 ✅" : (s.isEmpty ? "尚无检测数据" : "出口 IP 异常 ⚠️")
-        menu.addItem(disabled(head))
+        let head: String
+        switch network {
+        case "unstable": head = "出口探测接口波动 ⚠️"
+        case "verifying": head = "出口探测结果复核中…"
+        default: head = consistent == "1" ? "出口 IP 一致 ✅" : (s.isEmpty ? "尚无检测数据" : "出口 IP 异常 ⚠️")
+        }
+        if s.isEmpty {
+            menu.addItem(disabled(head))
+        } else if network != "ok" {
+            menu.addItem(colored(head, .systemOrange))
+        } else if consistent == "1" {
+            menu.addItem(colored(head, .systemGreen))
+        } else {
+            menu.addItem(colored(head, .systemRed))
+        }
+
+        let failures = Int(s["failure_count"] ?? "0") ?? 0
+        let confirmations = Int(s["confirm_count"] ?? "0") ?? 0
+        let required = Int(s["confirm_required"] ?? "2") ?? 2
+        let networkLine: String
+        if network == "unstable" {
+            networkLine = "探测状态: 接口波动（连续失败 \(failures) 次，沿用上次结果）"
+        } else if network == "verifying", failures > 0 {
+            networkLine = "探测状态: 单次接口波动（\(failures)/\(required)，沿用上次结果）"
+        } else if network == "verifying" {
+            networkLine = "出口状态: 正在复核（\(confirmations)/\(required)，沿用上次结果）"
+        } else if s.isEmpty {
+            networkLine = "探测状态: 尚未检测"
+        } else {
+            networkLine = "探测状态: 正常"
+        }
+        menu.addItem(disabled(networkLine))
+        if let latest = history.last {
+            let failedRoutes = NetworkRoute.allCases.filter { !latest.succeeded($0) }.map(\.title)
+            if !failedRoutes.isEmpty {
+                menu.addItem(disabled("波动位置: \(failedRoutes.joined(separator: "、"))"))
+            } else if latest.result == "inconsistent" {
+                menu.addItem(disabled("波动位置: 三路出口结果不一致"))
+            }
+        }
+        menu.addItem(networkHistoryMenuItem(history))
         menu.addItem(.separator())
         menu.addItem(disabled("国内视角: \(s["cn"] ?? "?")"))
         menu.addItem(disabled("国外视角: \(s["intl"] ?? "?")"))
@@ -216,7 +619,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(mi)
         }
         menu.addItem(.separator())
-        menu.addItem(action("立即检测", #selector(runCheck)))
+        if scanProcess != nil {
+            menu.addItem(disabled("正在检测出口…"))
+        } else {
+            menu.addItem(action("立即检测", #selector(runCheck)))
+        }
         // 检测间隔子菜单
         let intervalMenu = NSMenu()
         for (label, secs) in [("1 分钟", 60), ("2 分钟", 120), ("5 分钟", 300), ("10 分钟", 600)] {
@@ -247,6 +654,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.menu = menu
 
         autoCheckIfExitChanged(s)
+    }
+
+    func networkHistoryMenuItem(_ history: [NetworkHistoryPoint]) -> NSMenuItem {
+        let recent = Array(history.suffix(60))
+        let title = history.isEmpty ? "网络波动图（暂无数据）" : "网络波动图（最近 \(recent.count) 次）"
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        let chartItem = NSMenuItem()
+        chartItem.view = NetworkHistoryView(points: recent)
+        submenu.addItem(chartItem)
+        submenu.addItem(.separator())
+
+        if history.isEmpty {
+            submenu.addItem(disabled("24 小时内暂无检测记录"))
+        } else {
+            let changes = history.filter(\.ipChanged).count
+            submenu.addItem(disabled("24 小时统计: \(history.count) 次检测 · 确认换 IP \(changes) 次"))
+            for route in NetworkRoute.allCases {
+                submenu.addItem(disabled(routeSummary(route, history: history)))
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    func routeSummary(_ route: NetworkRoute, history: [NetworkHistoryPoint]) -> String {
+        let successes = history.filter { $0.succeeded(route) }
+        let failures = history.count - successes.count
+        let rate = history.isEmpty ? 0 : Int((Double(successes.count) * 100 / Double(history.count)).rounded())
+        let average = successes.isEmpty ? 0 : successes.reduce(0) { $0 + $1.seconds(for: route) } / Double(successes.count)
+        let duration = successes.isEmpty ? "—" : (average < 1 ? "<1 秒" : String(format: "%.1f 秒", average))
+        return "\(route.title): \(rate)% 成功 · 失败 \(failures) · 平均 \(duration)"
     }
 
     func disabled(_ t: String) -> NSMenuItem {
@@ -300,6 +740,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // ── Claude 环境体检 ──────────────────────────────────────────
     // 出口 IP 变了才自动重测(环境画像只跟着出口走)，避免每分钟去敲 anthropic API
     func autoCheckIfExitChanged(_ s: [String: String]) {
+        guard (s["network"] ?? "ok") == "ok" else { return }
         let ip = s["gfw"] ?? ""
         guard !ip.isEmpty, ip != "?" else { return }
         if ip != lastExitIP {
@@ -353,18 +794,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func claudeMenuItem() -> NSMenuItem {
         let c = readStatus(claudeStatusPath)
         let score = Int(c["score"] ?? "") ?? -1
-        let dot = score < 0 ? "⚪️" : (score >= 85 ? "🟢" : score >= 70 ? "🟡" : score >= 50 ? "🟠" : "🔴")
+        let grade = c["grade"] ?? ""
+        let exitConsistent = c["consistent"] == "1"
+        // 颜色必须和最终评级一致，不能再出现“🟢 85 分 · 风险”。
+        // 只有 90+、评级优秀且三路出口一致才是绿色；确认风险直接红色。
+        let isSafe = score >= 90 && grade == "优秀" && exitConsistent
+        let isWarning = !isSafe && score >= 70 && grade == "有风险" && exitConsistent
+        let dot = score < 0 ? "⚪️" : (isSafe ? "🟢" : (isWarning ? "🟠" : "🔴"))
+        let riskColor: NSColor = isSafe ? .labelColor : (isWarning ? .systemOrange : .systemRed)
         // 提分详情在子菜单顶部，标题只报状态，不啰嗦
-        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(c["grade"] ?? "")"
-        // 低于 70 分 = 环境不适合跑 Claude，整块标红，别让人漏看
-        let unfit = score >= 0 && score < 70
-        let alertColor: NSColor = unfit ? .systemRed : .labelColor
+        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(grade)"
+        let unfit = score >= 0 && !isSafe
+        let alertColor: NSColor = score < 0 ? .labelColor : riskColor
 
         let sub = NSMenu()
         if score < 0 {
             sub.addItem(disabled("尚未体检"))
         } else {
-            sub.addItem(unfit ? colored(c["verdict"] ?? "", .systemRed) : disabled(c["verdict"] ?? ""))
+            sub.addItem(unfit ? colored(c["verdict"] ?? "", riskColor) : disabled(c["verdict"] ?? ""))
 
             // 提分清单放最前面，橙色可点，别埋在明细里跟着一起变灰
             let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
@@ -400,14 +847,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             sub.addItem(.separator())
             sub.addItem(disabled("出口: \(c["ip"] ?? "?") · \(c["city"] ?? "") · \(c["asn"] ?? "?")"))
+            sub.addItem(disabled("IP 情报: \(c["intelsources"] ?? "未采集")"))
             sub.addItem(disabled("系统: \(c["os"] ?? "?") · \(c["locale"] ?? "?") · \(c["proxymode"] ?? "?")"))
             sub.addItem(disabled("DNS: \(c["dns"] ?? "?") · claude.ai → \(c["dnsresult"] ?? "?")"))
             sub.addItem(disabled("CLI: \(c["claudever"] ?? "?") · 接口 \(c["base"] ?? "?")"))
+            func reach(_ key: String, _ msKey: String) -> String {
+                let status = c[key] ?? "未采集"
+                if status == "ok", let ms = c[msKey], !ms.isEmpty { return "✓ \(ms)ms" }
+                if status == "ok" { return "✓" }
+                if status == "timeout" { return "超时" }
+                if status == "error" { return "异常" }
+                return "未采集"
+            }
+            sub.addItem(disabled("浏览器访问: Claude \(reach("brclaude", "brclaudems")) · 官网 \(reach("branthropic", "branthropicms")) · API \(reach("brapi", "brapims"))"))
+            let rtcStatus: String = {
+                switch c["brrtcstatus"] ?? "未采集" {
+                case "ok": return "完成"
+                case "none": return "完成，无公网候选"
+                case "timeout": return "超时"
+                case "error": return "异常"
+                case "unsupported": return "不支持或已禁用"
+                default: return "未采集"
+                }
+            }()
+            let rtcElapsed = (c["brrtcms"] ?? "").isEmpty ? "" : " · \(c["brrtcms"]!)ms"
+            sub.addItem(disabled("WebRTC 探测: \(rtcStatus) · 候选 \(c["brrtccandidates"] ?? "0") · 公网 \(c["brrtcpublic"] ?? "0")\(rtcElapsed)"))
+            let headerState: String
+            switch c["brheaders"] ?? "unknown" {
+            case "ok": headerState = "✓ 一致"
+            case "conflict": headerState = "⚠ 冲突"
+            case "partial": headerState = "部分采集"
+            default: headerState = "未采集"
+            }
+            sub.addItem(disabled("浏览器请求头: \(headerState) · Sec-Fetch \(c["brfetch"] ?? "?")"))
             let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
             let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
             if !issues.isEmpty {
                 sub.addItem(.separator())
-                issues.forEach { sub.addItem(unfit ? colored("⚠️  \($0)", .systemRed) : disabled("⚠️  \($0)")) }
+                issues.forEach { sub.addItem(unfit ? colored("⚠️  \($0)", riskColor) : disabled("⚠️  \($0)")) }
             }
             if !fixes.isEmpty {
                 sub.addItem(.separator())
@@ -448,6 +925,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 用户不知道是在下载还是卡死了。
     var upgradeTimer: Timer?
     func startUpgrade() {
+        updateToast?.dismiss()
         try? "启动中".write(toFile: upgradeStatePath, atomically: true, encoding: .utf8)
         upgradeTimer?.invalidate()
         upgradeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -471,36 +949,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
 
-    @objc func runCheck() { runScript(["--once"]) }
+    @objc func runCheck() { runScript(["--once"], isScan: true) }
 
-    // 发现新版直接弹对话框问要不要装 —— 纯通知只是告知，用户还得自己去菜单栏找入口，太绕。
-    // 每天最多弹一次: 只弹一次会错过，每次重画菜单都弹会烦死人。
-    var promptingUpgrade = false
+    // 发现新版时主动显示右下角非模态提示，不抢当前窗口焦点；每天最多提醒一次。
+    func presentUpdateToast(_ latest: String, throttled: Bool) {
+        let defaults = UserDefaults.standard
+        let key = "notifiedVersion", timestampKey = "notifiedAt"
+        if throttled {
+            let sameVersion = defaults.string(forKey: key) == latest
+            let elapsed = Date().timeIntervalSince1970 - defaults.double(forKey: timestampKey)
+            guard !sameVersion || elapsed > 86400 else { return }
+        }
+        guard updateToast == nil else { return }
+
+        defaults.set(latest, forKey: key)
+        defaults.set(Date().timeIntervalSince1970, forKey: timestampKey)
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let toast = UpdateToastController(current: current, latest: latest,
+            onUpgrade: { [weak self] in self?.startUpgrade() },
+            onDismiss: { [weak self] in self?.updateToast = nil })
+        updateToast = toast
+        toast.show()
+    }
+
     func notifyNewVersion(_ latest: String) {
-        let d = UserDefaults.standard
-        let key = "notifiedVersion", tsKey = "notifiedAt"
-        let sameVersion = d.string(forKey: key) == latest
-        let elapsed = Date().timeIntervalSince1970 - d.double(forKey: tsKey)
-        guard !sameVersion || elapsed > 86400 else { return }
-        guard !promptingUpgrade else { return }
-        promptingUpgrade = true
-        d.set(latest, forKey: key)
-        d.set(Date().timeIntervalSince1970, forKey: tsKey)
-
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            defer { self.promptingUpgrade = false }
-            let cur = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-            NSApp.activate(ignoringOtherApps: true)
-            let a = NSAlert()
-            a.messageText = "CheckClaude 有新版本 v\(latest)"
-            a.informativeText = "当前 v\(cur)。点「立即升级」自动下载、安装并重启，无需其它操作。"
-            a.alertStyle = .informational
-            a.addButton(withTitle: "立即升级")
-            a.addButton(withTitle: "稍后提醒")
-            if a.runModal() == .alertFirstButtonReturn {
-                self.startUpgrade()
-            }
+            self?.presentUpdateToast(latest, throttled: true)
         }
     }
 
@@ -510,7 +984,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             let u = self.readStatus(updatePath)
             if u["hasupdate"] == "1", let l = u["latest"] {
-                self.notify("发现新版本 v\(l)", "点菜单栏「⬆ 升级到 v\(l)」一键更新")
+                self.presentUpdateToast(l, throttled: false)
             } else {
                 self.notify("已经是最新版本", "v\(u["current"] ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"))")
             }
@@ -570,6 +1044,8 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
         timeout = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.collected["rtc_timeout"] = "1"
+            let rtc = String(describing: self.collected["rtc_status"] ?? "")
+            if rtc.isEmpty || rtc == "collecting" { self.collected["rtc_status"] = "timeout" }
             self.finish(self.collected)
         }
     }
@@ -611,6 +1087,8 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
       };
       try {
         // ── 浏览器身份画像 ──
+        out.source = 'webview';
+        out.ua_js = navigator.userAgent || '';
         out.languages = (navigator.languages || []).join(',');
         const ro = Intl.DateTimeFormat().resolvedOptions();
         out.tz = ro.timeZone || '';
@@ -655,32 +1133,72 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
           s.remove();
         } catch (e) { out.fonts = ''; }
 
-        send('sync');   // 同步信号先落盘，WebRTC 慢或不通也不会连累它们
+        send('sync');   // 同步信号先落盘，网络探测或 WebRTC 慢时也不会连累它们
 
-        // ── WebRTC 泄漏: UDP 不走 HTTP 代理，能暴露代理没兜住的真实出口 ──
-        out.rtc_host = ''; out.rtc_srflx = '';
-        try {
-          const pc = new RTCPeerConnection({ iceServers: [
-            { urls: 'stun:stun.cloudflare.com:3478' },
-            { urls: 'stun:stun.l.google.com:19302' }
-          ]});
-          pc.createDataChannel('probe');
-          const hosts = new Set(), srflx = new Set();
-          pc.onicecandidate = e => {
-            if (!e.candidate) return;
-            const c = e.candidate.candidate;
-            const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
-            if (!m) return;
-            if (c.indexOf('typ host') >= 0) hosts.add(m[1]);
-            if (c.indexOf('typ srflx') >= 0) srflx.add(m[1]);
-          };
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          await new Promise(r => setTimeout(r, 4000));
-          out.rtc_host = [...hosts].join(',');
-          out.rtc_srflx = [...srflx].join(',');
-          pc.close();
-        } catch (e) { out.rtc_err = String(e).slice(0, 60); }
+        // ── 浏览器侧 Claude 服务可达性 ──
+        // shell curl 和真实浏览器可能走不同的 PAC/扩展代理；这里只判断传输路径能否完成，
+        // no-cors 看不到 401/403，不能替代 shell 侧的地区拦截判定。
+        const reachOne = async (key, url) => {
+          const started = performance.now(), ctl = new AbortController();
+          const timer = setTimeout(() => ctl.abort(), 3500);
+          try {
+            await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctl.signal });
+            out['reach_' + key] = 'ok';
+            out['reach_' + key + '_ms'] = String(Math.round(performance.now() - started));
+          } catch (e) {
+            out['reach_' + key] = e && e.name === 'AbortError' ? 'timeout' : 'error';
+            out['reach_' + key + '_ms'] = '';
+          } finally { clearTimeout(timer); }
+        };
+        const reachPromise = Promise.all([
+          reachOne('claude', 'https://claude.ai/'),
+          reachOne('anthropic', 'https://www.anthropic.com/'),
+          reachOne('api', 'https://api.anthropic.com/')
+        ]);
+
+        // ── WebRTC 泄漏: 明确区分无泄漏、超时、异常和不支持 ──
+        out.rtc_host = ''; out.rtc_srflx = ''; out.rtc_candidate_count = '0';
+        out.rtc_public_count = '0'; out.rtc_supported = '0'; out.rtc_status = 'unsupported';
+        if ('RTCPeerConnection' in window) {
+          out.rtc_supported = '1'; out.rtc_status = 'collecting';
+          const rtcStarted = performance.now();
+          try {
+            const pc = new RTCPeerConnection({ iceServers: [
+              { urls: 'stun:stun.cloudflare.com:3478' },
+              { urls: 'stun:stun.l.google.com:19302' }
+            ]});
+            pc.createDataChannel('probe');
+            const hosts = new Set(), srflx = new Set();
+            let candidates = 0, completed = false, finishGathering;
+            const gathered = new Promise(r => { finishGathering = r; });
+            pc.onicecandidate = e => {
+              if (!e.candidate) { completed = true; finishGathering(); return; }
+              candidates += 1;
+              const c = e.candidate.candidate;
+              const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
+              if (!m) return;
+              if (c.indexOf('typ host') >= 0) hosts.add(m[1]);
+              if (c.indexOf('typ srflx') >= 0) srflx.add(m[1]);
+            };
+            pc.onicegatheringstatechange = () => {
+              if (pc.iceGatheringState === 'complete') { completed = true; finishGathering(); }
+            };
+            await pc.setLocalDescription(await pc.createOffer());
+            await Promise.race([gathered, new Promise(r => setTimeout(r, 4500))]);
+            out.rtc_host = [...hosts].join(',');
+            out.rtc_srflx = [...srflx].join(',');
+            out.rtc_candidate_count = String(candidates);
+            out.rtc_public_count = String(srflx.size);
+            out.rtc_elapsed_ms = String(Math.round(performance.now() - rtcStarted));
+            out.rtc_status = srflx.size > 0 ? 'ok' : (completed ? 'none' : 'timeout');
+            pc.close();
+          } catch (e) {
+            out.rtc_status = 'error';
+            out.rtc_elapsed_ms = String(Math.round(performance.now() - rtcStarted));
+            out.rtc_err = String(e).slice(0, 60);
+          }
+        }
+        await reachPromise;
       } catch (e) {
         out.error = String(e).slice(0, 100);
       }
@@ -809,6 +1327,7 @@ final class BrowserBridge {
           const o = {};
           const set = (k, v) => { o[k] = String(v == null ? "" : v).replace(/\\n/g, " "); };
           try {
+            set("ua_js", navigator.userAgent || "");
             set("languages", (navigator.languages || []).join(","));
             const ro = Intl.DateTimeFormat().resolvedOptions();
             set("tz", ro.timeZone); set("locale", ro.locale);
@@ -854,25 +1373,62 @@ final class BrowserBridge {
               set("fonts", probe.filter(f => { sp.style.fontFamily = "'" + f + "',monospace"; return sp.offsetWidth !== base; }).join(","));
               sp.remove();
             } catch (e) {}
-            // WebRTC: UDP 不经 HTTP 代理，能暴露代理没兜住的真实出口
-            try {
-              const pc = new RTCPeerConnection({ iceServers: [
-                { urls: "stun:stun.cloudflare.com:3478" }, { urls: "stun:stun.l.google.com:19302" }] });
-              pc.createDataChannel("p");
-              const hosts = new Set(), srflx = new Set();
-              pc.onicecandidate = e => {
-                if (!e.candidate) return;
-                const c = e.candidate.candidate;
-                const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
-                if (!m) return;
-                if (c.indexOf("typ host") >= 0) hosts.add(m[1]);
-                if (c.indexOf("typ srflx") >= 0) srflx.add(m[1]);
-              };
-              await pc.setLocalDescription(await pc.createOffer());
-              await new Promise(r => setTimeout(r, 4500));
-              set("rtc_host", [...hosts].join(",")); set("rtc_srflx", [...srflx].join(","));
-              pc.close();
-            } catch (e) {}
+            // 浏览器侧 Claude 服务可达性：和 WebRTC 并行，避免额外延长体检。
+            const reachOne = async (key, url) => {
+              const started = performance.now(), ctl = new AbortController();
+              const timer = setTimeout(() => ctl.abort(), 3500);
+              try {
+                await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctl.signal });
+                set("reach_" + key, "ok");
+                set("reach_" + key + "_ms", Math.round(performance.now() - started));
+              } catch (e) {
+                set("reach_" + key, e && e.name === "AbortError" ? "timeout" : "error");
+                set("reach_" + key + "_ms", "");
+              } finally { clearTimeout(timer); }
+            };
+            const reachPromise = Promise.all([
+              reachOne("claude", "https://claude.ai/"),
+              reachOne("anthropic", "https://www.anthropic.com/"),
+              reachOne("api", "https://api.anthropic.com/")
+            ]);
+            // WebRTC: 明确区分无泄漏、超时、异常和不支持
+            set("rtc_host", ""); set("rtc_srflx", ""); set("rtc_candidate_count", 0);
+            set("rtc_public_count", 0); set("rtc_supported", 0); set("rtc_status", "unsupported");
+            if ("RTCPeerConnection" in window) {
+              set("rtc_supported", 1); set("rtc_status", "collecting");
+              const rtcStarted = performance.now();
+              try {
+                const pc = new RTCPeerConnection({ iceServers: [
+                  { urls: "stun:stun.cloudflare.com:3478" }, { urls: "stun:stun.l.google.com:19302" }] });
+                pc.createDataChannel("p");
+                const hosts = new Set(), srflx = new Set();
+                let candidates = 0, completed = false, finishGathering;
+                const gathered = new Promise(r => { finishGathering = r; });
+                pc.onicecandidate = e => {
+                  if (!e.candidate) { completed = true; finishGathering(); return; }
+                  candidates += 1;
+                  const c = e.candidate.candidate;
+                  const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
+                  if (!m) return;
+                  if (c.indexOf("typ host") >= 0) hosts.add(m[1]);
+                  if (c.indexOf("typ srflx") >= 0) srflx.add(m[1]);
+                };
+                pc.onicegatheringstatechange = () => {
+                  if (pc.iceGatheringState === "complete") { completed = true; finishGathering(); }
+                };
+                await pc.setLocalDescription(await pc.createOffer());
+                await Promise.race([gathered, new Promise(r => setTimeout(r, 4500))]);
+                set("rtc_host", [...hosts].join(",")); set("rtc_srflx", [...srflx].join(","));
+                set("rtc_candidate_count", candidates); set("rtc_public_count", srflx.size);
+                set("rtc_elapsed_ms", Math.round(performance.now() - rtcStarted));
+                set("rtc_status", srflx.size > 0 ? "ok" : (completed ? "none" : "timeout"));
+                pc.close();
+              } catch (e) {
+                set("rtc_status", "error"); set("rtc_elapsed_ms", Math.round(performance.now() - rtcStarted));
+                set("rtc_err", String(e).slice(0, 60));
+              }
+            }
+            await reachPromise;
           } catch (e) { set("error", e); }
           const body = Object.keys(o).map(k => k + "=" + o[k]).join("\\n");
           try {
@@ -884,7 +1440,7 @@ final class BrowserBridge {
               ["平台", (o.uad_platform || navigator.platform) + (o.uad_platform_version ? " " + o.uad_platform_version : "")],
               ["Client Hints", navigator.userAgentData ? "已获取（Chromium）" : "该浏览器不提供（Safari / Firefox）"],
               ["时区 / 语言", o.tz + " · " + o.languages],
-              ["WebRTC 出口", o.rtc_srflx ? o.rtc_srflx : "无泄漏（未拿到公网候选）"],
+              ["WebRTC 出口", o.rtc_status === "ok" ? o.rtc_srflx : (o.rtc_status === "none" ? "检测完成，无公网候选" : "检测" + (o.rtc_status || "未知"))],
               ["渲染环境", o.webgl || "未取到"],
               ["中文字体", o.fonts ? o.fonts.split(",").length + " 种" : "无"],
             ];
