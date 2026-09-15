@@ -199,5 +199,31 @@ EOF
 parse_stability
 check "24h 仅统计一次确认变化" "$IP_CHANGES" 1
 
+echo "㉔ 总评分单次探测失败保留上次有效分数，连续两次才发布"
+rm -f "$CSTATUS" "$CCANDIDATE" "$CPROBE_STATE"
+base_signals; compute_score; build_gains; publish_cstatus
+check "先写入健康基线" "$(status_value "$CSTATUS" score)" 100
+base_signals; API_CODE=000; WEB_CODE=000; compute_score; build_gains
+candidate_score=$SCORE
+publish_cstatus || true
+check "第一次失败仍显示旧分数" "$(status_value "$CSTATUS" score)" 100
+check "第一次标记复核中" "$(status_value "$CPROBE_STATE" state)" verifying
+check "候选分数单独保存" "$(status_value "$CCANDIDATE" score)" "$candidate_score"
+publish_cstatus || true
+check "第二次失败才发布低分" "$(status_value "$CSTATUS" score)" "$candidate_score"
+check "第二次标记波动" "$(status_value "$CPROBE_STATE" state)" unstable
+base_signals; compute_score; build_gains; publish_cstatus
+check "恢复后立即发布健康分数" "$(status_value "$CSTATUS" score)" 100
+check "恢复后清零状态" "$(status_value "$CPROBE_STATE" state)/$(status_value "$CPROBE_STATE" failure_count)" "ok/0"
+check "候选文件已清理" "$([[ -e "$CCANDIDATE" ]] && echo yes || echo no)" no
+
+echo "㉕ 已确认的关键风险即使伴随超时也必须立即发布"
+base_signals; compute_score; build_gains; publish_cstatus
+base_signals; COUNTRY=CN; COUNTRY2=CN; COUNTRY3=CN; COUNTRY4=CN; API_CODE=000; compute_score; build_gains
+confirmed_score=$SCORE
+publish_cstatus || true
+check "不被旧高分掩盖" "$(status_value "$CSTATUS" score)" "$confirmed_score"
+check "已确认风险不进入复核" "$(status_value "$CPROBE_STATE" state)" ok
+
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }

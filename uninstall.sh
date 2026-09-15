@@ -3,10 +3,13 @@
 set -uo pipefail
 DAEMON="com.example.checkclaude-daemon"
 AGENT="com.example.checkclaude"
+LEGACY_AGENT="com.hx10.checkclaude"
 
 echo "==> 卸载菜单栏 App"
-launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/$AGENT.plist"
+for id in "$AGENT" "$LEGACY_AGENT"; do
+  launchctl bootout "gui/$(id -u)/$id" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/$id.plist"
+done
 pkill -x CheckClaude 2>/dev/null || true
 
 echo "==> 卸载系统守护进程(需要管理员密码)"

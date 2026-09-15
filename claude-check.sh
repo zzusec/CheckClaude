@@ -23,6 +23,9 @@ OLD_DIR="$HOME/Library/Application Support/AutoTimezone"
 mkdir -p "$DATA_DIR" 2>/dev/null || true
 STATUS="$DATA_DIR/status"                # auto-timezone.sh 写的三路出口快照
 CSTATUS="$DATA_DIR/claude_status"        # 本脚本写的体检快照(菜单栏 App 读)
+CCANDIDATE="$DATA_DIR/claude_status_candidate" # 单次异常候选，不覆盖上次有效评分
+CPROBE_STATE="$DATA_DIR/claude_probe_state"   # 总评分防抖状态
+SCORE_CONFIRM_REQUIRED=2
 LOG="$DATA_DIR/auto-timezone.log"
 NETWORK_HISTORY="$DATA_DIR/network_history"  # auto-timezone.sh 写入，字段 5 只标记已确认的 IP 变化
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -73,6 +76,52 @@ sig() {
   [[ -n "${6:-}" ]] && add_issue "$6"
   [[ -n "${7:-}" ]] && add_fix "$7"
   return 0
+}
+
+status_value() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 1
+  sed -n "s/^${key}=//p" "$file" | head -1
+}
+
+write_score_probe_state() {
+  local state="$1" failures="$2" candidate="$3" detail="$4"
+  local tmp="${CPROBE_STATE}.tmp.$$"
+  {
+    echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "state=$state"
+    echo "failure_count=$failures"
+    echo "confirm_required=$SCORE_CONFIRM_REQUIRED"
+    echo "candidate_score=$candidate"
+    echo "detail=$detail"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$CPROBE_STATE" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# 只把“探测没拿到数据”当作可防抖故障。HTTP 403、地区/时区冲突等有明确
+# 返回值的真实风险仍立即发布，不能被旧高分掩盖。
+transient_check_reasons() {
+  local reasons=""
+  [[ "${API_CODE:-000}" == "000" ]] && reasons+="${reasons:+、}Anthropic API 超时"
+  [[ "${WEB_CODE:-000}" == "000" ]] && reasons+="${reasons:+、}claude.ai 超时"
+  [[ "${SITE_CODE:-000}" == "000" ]] && reasons+="${reasons:+、}anthropic.com 超时"
+  [[ "${INTEL_COUNT:-0}" -lt 2 ]] && reasons+="${reasons:+、}IP 情报不足"
+  [[ -z "${CF_IP:-}" || -z "${CF_LOC:-}" ]] && reasons+="${reasons:+、}Cloudflare 探测失败"
+  [[ "${DNS_VERDICT:-}" == "解析失败" ]] && reasons+="${reasons:+、}DNS 解析失败"
+  printf '%s\n' "$reasons"
+}
+
+confirmed_risk_present() {
+  [[ -n "${COUNTRY:-}" ]] && in_list "$COUNTRY" "$UNSUPPORTED" && return 0
+  [[ "${API_CODE:-}" == "403" || "${API_REGION_BLOCK:-0}" == "1" ]] && return 0
+  [[ "${CONSISTENT:-1}" != "1" ]] && return 0
+  [[ "${GFW_TZ:-}" == */* && "${SYS_TZ:-}" != "${GFW_TZ:-}" ]] && return 0
+  [[ -n "${IPV6:-}" && -n "${IPV6_CC:-}" && "${IPV6_CC}" != "${COUNTRY:-}" ]] && return 0
+  if [[ "${BR_RTC_STATUS:-}" == "ok" && -n "${BR_RTC:-}" && "${BR_RTC}" != *"${PROBE_IP:-?}"* ]]; then
+    return 0
+  fi
+  [[ "${DNS_VERDICT:-}" == 被污染* ]] && return 0
+  return 1
 }
 
 # ── 采集: 三路出口快照(复用 auto-timezone.sh 的结果) ─────────────
@@ -957,6 +1006,7 @@ fixable_list() {
 }
 
 write_cstatus() {
+  local target="${1:-$CSTATUS}" tmp="${1:-$CSTATUS}.tmp.$$"
   local iptype
   iptype=$( [[ "$PROXY" == 1 ]] && echo 代理/VPN || { [[ "$HOSTING" == 1 ]] && echo 机房IDC || { [[ "$HOSTING" == -1 ]] && echo 未知 || echo 住宅; }; } )
   {
@@ -987,7 +1037,37 @@ write_cstatus() {
     echo "signals=$(IFS=';'; echo "${SIGNALS[*]}")"
     echo "gains=$GAINS"
     echo "issues=$ISSUES"; echo "fixes=$FIXES"
-  } >"$CSTATUS" 2>/dev/null || true
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$target" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+publish_cstatus() {
+  local reasons previous_score failures=0
+  reasons=$(transient_check_reasons)
+  previous_score=$(status_value "$CSTATUS" score || true)
+  failures=$(status_value "$CPROBE_STATE" failure_count || true)
+  [[ "$failures" =~ ^[0-9]+$ ]] || failures=0
+
+  if [[ -n "$reasons" && "$previous_score" =~ ^[0-9]+$ && $SCORE -lt $previous_score ]] \
+      && ! confirmed_risk_present; then
+    failures=$(( failures + 1 ))
+    if [[ $failures -lt $SCORE_CONFIRM_REQUIRED ]]; then
+      write_cstatus "$CCANDIDATE"
+      write_score_probe_state "verifying" "$failures" "$SCORE" "$reasons"
+      log "claude-check: 候选 ${SCORE}/100（${reasons}），保留上次 ${previous_score}/100，复核 ${failures}/${SCORE_CONFIRM_REQUIRED}"
+      return 1
+    fi
+
+    write_cstatus "$CSTATUS"
+    write_score_probe_state "unstable" "$failures" "$SCORE" "$reasons"
+    rm -f "$CCANDIDATE"
+    return 0
+  fi
+
+  write_cstatus "$CSTATUS"
+  write_score_probe_state "ok" 0 "$SCORE" ""
+  rm -f "$CCANDIDATE"
+  return 0
 }
 
 print_report() {
@@ -1064,9 +1144,12 @@ main() {
     fi
   fi
   build_gains
-  write_cstatus
+  local published=1
+  publish_cstatus || published=0
   [[ "$MODE" != "quiet" ]] && print_report
-  log "claude-check: ${SCORE}/100 ${GRADE} country=${COUNTRY:-?} api=${API_CODE} dns=${DNS_VERDICT}"
+  if [[ $published -eq 1 ]]; then
+    log "claude-check: ${SCORE}/100 ${GRADE} country=${COUNTRY:-?} api=${API_CODE} dns=${DNS_VERDICT}"
+  fi
   exit 0
 }
 
