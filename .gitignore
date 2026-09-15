@@ -1,6 +1,7 @@
 # 构建产物
 menubar/AutoTimezone.app/
 menubar/AutoTimezone
+menubar/CheckClaude.app/
 *.dmg
 
 # 运行时数据 / 日志(含本机 IP，勿提交)

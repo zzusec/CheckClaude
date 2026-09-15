@@ -4,18 +4,22 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 AGENT="com.example.checkclaude"
+LEGACY_AGENT="com.hx10.checkclaude"
 
 echo "==> 1/3 构建 App"
 bash "$DIR/menubar/build.sh"
 
 echo "==> 2/3 安装到 /Applications"
-launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
+for id in "$AGENT" "$LEGACY_AGENT"; do
+  launchctl bootout "gui/$(id -u)/$id" 2>/dev/null || true
+done
 pkill -x CheckClaude 2>/dev/null || true
 ditto "$DIR/menubar/CheckClaude.app" /Applications/CheckClaude.app
 codesign --force --deep --sign - /Applications/CheckClaude.app 2>/dev/null || true
 
 echo "==> 3/3 设为开机自启(当前用户)"
 mkdir -p "$HOME/Library/LaunchAgents"
+rm -f "$HOME/Library/LaunchAgents/$LEGACY_AGENT.plist"
 cp "$DIR/menubar/$AGENT.plist" "$HOME/Library/LaunchAgents/$AGENT.plist"
 launchctl bootout "gui/$(id -u)/$AGENT" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$AGENT.plist"

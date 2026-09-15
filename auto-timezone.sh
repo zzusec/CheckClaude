@@ -88,6 +88,9 @@ write_status() {
     echo "confirm_count=$confirmations"
     echo "confirm_required=$CONFIRM_REQUIRED"
     echo "network_detail=$detail"
+    echo "timezone_confirm_count=${PENDING_TZ_COUNT:-0}"
+    echo "timezone_confirm_required=$CONFIRM_REQUIRED"
+    echo "timezone_detail=${TIMEZONE_DETAIL:-}"
     echo "last_success=$last_success"
   } >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$STATUS" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
@@ -103,6 +106,9 @@ write_probe_state() {
     echo "pending_count=$PENDING_COUNT"
     echo "network=$NETWORK_STATE"
     echo "last_success=$LAST_SUCCESS"
+    echo "stable_timezone=$STABLE_TIMEZONE"
+    echo "pending_timezone=$PENDING_TIMEZONE"
+    echo "pending_timezone_count=$PENDING_TZ_COUNT"
   } >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$PROBE_STATE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
@@ -148,7 +154,8 @@ read_snapshot() {
 
 load_probe_state() {
   STABLE_IP=""; STABLE_CONSISTENT=""; FAILURE_COUNT=0; PENDING_KEY=""; PENDING_COUNT=0
-  NETWORK_STATE="ok"; LAST_SUCCESS=""
+  NETWORK_STATE="ok"; LAST_SUCCESS=""; STABLE_TIMEZONE=""; PENDING_TIMEZONE=""
+  PENDING_TZ_COUNT=0; TIMEZONE_DETAIL=""
   local k v
   if [[ -f "$PROBE_STATE" ]]; then
     while IFS='=' read -r k v; do
@@ -157,11 +164,14 @@ load_probe_state() {
         failure_count) FAILURE_COUNT="$v" ;; pending_key) PENDING_KEY="$v" ;;
         pending_count) PENDING_COUNT="$v" ;; network) NETWORK_STATE="$v" ;;
         last_success) LAST_SUCCESS="$v" ;;
+        stable_timezone) STABLE_TIMEZONE="$v" ;; pending_timezone) PENDING_TIMEZONE="$v" ;;
+        pending_timezone_count) PENDING_TZ_COUNT="$v" ;;
       esac
     done <"$PROBE_STATE"
   fi
   [[ "$FAILURE_COUNT" =~ ^[0-9]+$ ]] || FAILURE_COUNT=0
   [[ "$PENDING_COUNT" =~ ^[0-9]+$ ]] || PENDING_COUNT=0
+  [[ "$PENDING_TZ_COUNT" =~ ^[0-9]+$ ]] || PENDING_TZ_COUNT=0
 
   # 从旧版本升级时没有 probe_state；用既有 last_state/status 建立有效基线，避免首次失败清空 IP。
   if [[ -z "$STABLE_IP" && -f "$STATE" ]]; then
@@ -175,6 +185,7 @@ load_probe_state() {
   fi
   [[ -n "$LAST_SUCCESS" ]] || LAST_SUCCESS="$SNAP_LAST_SUCCESS"
   [[ -n "$STABLE_CONSISTENT" ]] || STABLE_CONSISTENT="$SNAP_CONSISTENT"
+  [[ -n "$STABLE_TIMEZONE" ]] || STABLE_TIMEZONE="$SNAP_GFWTZ"
 }
 
 # 网络暂时失败时保留上次确认的三路 IP；没有历史时才显示本次拿到的部分结果。
@@ -316,6 +327,44 @@ set_timezone() {
   return 1
 }
 
+# 同一个已确认出口 IP 的时区不应在几分钟内跨洲跳变。第三方情报源单次
+# 返回不同结果时先沿用上次时区，连续两次相同才接受；确认的新 IP 则立即采用。
+confirm_timezone_candidate() {
+  local tz_ip="$1" previous_ip="$2" candidate="$3"
+  local baseline="$STABLE_TIMEZONE"
+  [[ "$baseline" == */* ]] || baseline="$SNAP_GFWTZ"
+  CONFIRMED_TIMEZONE="$candidate"
+  TIMEZONE_DETAIL=""
+
+  if [[ "$candidate" != */* ]]; then
+    if [[ "$tz_ip" == "$previous_ip" && "$baseline" == */* ]]; then
+      CONFIRMED_TIMEZONE="$baseline"
+    fi
+    return 0
+  fi
+
+  if [[ "$tz_ip" == "$previous_ip" && "$baseline" == */* && "$candidate" != "$baseline" ]]; then
+    if [[ "$PENDING_TIMEZONE" == "$candidate" ]]; then
+      PENDING_TZ_COUNT=$(( PENDING_TZ_COUNT + 1 ))
+    else
+      PENDING_TIMEZONE="$candidate"
+      PENDING_TZ_COUNT=1
+    fi
+
+    if [[ $PENDING_TZ_COUNT -lt $CONFIRM_REQUIRED ]]; then
+      CONFIRMED_TIMEZONE="$baseline"
+      TIMEZONE_DETAIL="时区变化复核中：${candidate}（${PENDING_TZ_COUNT}/${CONFIRM_REQUIRED}）"
+      log "⏳ 同一出口 IP 的时区变化待确认：${baseline} -> ${candidate}（${PENDING_TZ_COUNT}/${CONFIRM_REQUIRED}），暂不修改系统时区"
+      return 1
+    fi
+  fi
+
+  STABLE_TIMEZONE="$candidate"
+  PENDING_TIMEZONE=""
+  PENDING_TZ_COUNT=0
+  return 0
+}
+
 handle_incomplete_probe() {
   FAILURE_COUNT=$(( FAILURE_COUNT + 1 ))
   PENDING_KEY=""; PENDING_COUNT=0
@@ -375,14 +424,16 @@ confirm_or_commit_probe() {
   FAILURE_COUNT=0; PENDING_KEY=""; PENDING_COUNT=0; NETWORK_STATE="ok"
   LAST_SUCCESS=$(date '+%Y-%m-%d %H:%M:%S')
 
-  local gfwtz=""
-  gfwtz=$(ip_timezone "$tz_ip") || gfwtz=""
+  local raw_gfwtz="" gfwtz=""
+  raw_gfwtz=$(ip_timezone "$tz_ip") || raw_gfwtz=""
   # 同一已确认 IP 的时区情报接口偶发不可达时，沿用已有时区，避免菜单内容闪空。
-  if [[ -z "$gfwtz" && "$tz_ip" == "$previous_stable" && "$SNAP_GFWTZ" == */* ]]; then
-    gfwtz="$SNAP_GFWTZ"
-    log "  IP 时区接口暂时不可达，沿用上次时区: ${gfwtz}"
+  if [[ -z "$raw_gfwtz" && "$tz_ip" == "$previous_stable" && "$STABLE_TIMEZONE" == */* ]]; then
+    raw_gfwtz="$STABLE_TIMEZONE"
+    log "  IP 时区接口暂时不可达，沿用上次时区: ${raw_gfwtz}"
   fi
-  log "  谷歌侧出口 ${tz_ip} 对应时区: ${gfwtz:-解析失败}"
+  confirm_timezone_candidate "$tz_ip" "$previous_stable" "$raw_gfwtz" || true
+  gfwtz="$CONFIRMED_TIMEZONE"
+  log "  谷歌侧出口 ${tz_ip} 对应时区: ${raw_gfwtz:-解析失败}${TIMEZONE_DETAIL:+（暂沿用 ${gfwtz}）}"
 
   write_status "$consistent" "$cn" "$intl" "$gfw" "$goog" "${gfwtz:-?}" \
     "ok" 0 0 "三路探测完成" "$LAST_SUCCESS"

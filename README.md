@@ -25,6 +25,15 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.4（2026-09-15）
+
+- 完整体检遇到单次公网探测超时时保留上次有效分数，连续两次失败才发布低分，避免 98 分瞬间跌到 60 多分。
+- 浏览器画像采集完成后只发布一次最终评分，不再把中间分数显示到菜单栏或触发假告警。
+- 同一个出口 IP 的时区突然变化时连续确认两次才采用，避免情报接口误报导致洛杉矶/纽约来回切换。
+- 「检查更新」增加菜单内进行中状态和 App 内成功/失败提示；本次联网失败不会再拿旧缓存冒充检查成功。
+- 开机自启仍保留，但移除 LaunchAgent `KeepAlive`；用户点击「退出」后不会再被系统立即拉起。
+- 安装和升级会清理旧 `com.hx10.checkclaude` 启动项及重复进程，避免多个实例同时检测。
+
 两端使用同一套评分模型（26 项加权信号，合计 100）。完整体检会通过本机回环地址打开系统默认浏览器，
 采集 WebRTC、Intl、Client Hints、HTTP 语言首标、WebGL、Canvas 和字体等真实浏览器信号；数据只回传给本机 CheckClaude。
 浏览器桥接还会并行检查 `claude.ai`、Anthropic 官网和 API 的浏览器侧传输路径与耗时，用来发现浏览器扩展代理/PAC 与 shell 网络路径不一致；该结果是诊断信息，不把 `no-cors` 当作 HTTP 状态判断。
@@ -68,7 +77,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：26 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
-| `test-claude-check.sh` / `test-auto-timezone.sh` | macOS 体检评分与网络波动状态机自测（不联网） |
+| `test-claude-check.sh` / `test-auto-timezone.sh` / `test-upgrade.sh` | macOS 体检评分、网络波动和更新流程自测（不联网） |
 | `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级；发现新版主动显示右下角提示，点击后在线安装并自动重启 |
 | `windows/Program.cs` | Windows 版托盘、检测、修复和升级主逻辑 |
 | `windows/BrowserBridge.cs` | Windows 真实浏览器指纹本地桥接 |
@@ -186,13 +195,15 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 
-自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`
+自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`、`bash test-upgrade.sh`
 
 ## 告警
 
 - 出口 IP 连续两次确认发生变化 → 通知「出口 IP 变化 A → B」。
 - 由一致变为不一致 → 通知「⚠️ 出口 IP 异常」；恢复一致 → 通知「出口已恢复正常」。
 - 单次查询失败只显示「网络检测波动」并沿用上次有效结果，不把获取失败当成 IP 变化。
+- 完整体检的单次网络失败只显示「复核中」并保留上次有效分数；连续两次失败才正式降分。
+- 同一出口 IP 的时区变化也需要连续两次确认，单个情报源的短暂误报不会修改系统时区。
 - 检测进程带互斥锁，慢请求不会与下一轮并发覆盖状态。
 - 仅在状态**真正变化**时提醒，不会每 5 分钟刷屏。
 
@@ -206,6 +217,9 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 - 子菜单同时汇总最近 24 小时各路成功率、失败次数、平均耗时和 IP 变化次数。
 
 图标含义：🟢 一致　🟠 网络波动/复核中　🔴 异常　⚪️ 暂无数据。
+
+「检查更新」执行期间菜单会显示进行中状态；完成后由 CheckClaude 自己显示“已是最新版”、发现新版或联网失败，
+不依赖系统通知权限。登录时仍会自动启动；主动点「退出」后保持退出，直到用户再次打开或下次登录。
 
 ## 打包成 dmg(分发)
 

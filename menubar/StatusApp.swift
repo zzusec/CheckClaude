@@ -20,6 +20,7 @@ let baseDir: String = {
 }()
 let statusPath = (baseDir as NSString).appendingPathComponent("status")
 let claudeStatusPath = (baseDir as NSString).appendingPathComponent("claude_status")
+let claudeProbeStatePath = (baseDir as NSString).appendingPathComponent("claude_probe_state")
 let browserPath = (baseDir as NSString).appendingPathComponent("browser_signals")
 let logPath = (baseDir as NSString).appendingPathComponent("auto-timezone.log")
 let networkHistoryPath = (baseDir as NSString).appendingPathComponent("network_history")
@@ -351,6 +352,127 @@ final class UpdateToastController: NSObject {
     @objc private func closeToast() { dismiss() }
 }
 
+// 更新检查结果使用 App 自己的非模态提示，不依赖系统通知权限或专注模式。
+final class FeedbackToastController: NSObject {
+    private var panel: NSPanel!
+    private var timer: Timer?
+    private let onDismiss: () -> Void
+
+    init(symbol: String, color: NSColor, titleText: String, bodyText: String,
+         onDismiss: @escaping () -> Void) {
+        self.onDismiss = onDismiss
+        super.init()
+
+        let size = NSSize(width: 360, height: 92)
+        let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.borderless, .nonactivatingPanel],
+                        backing: .buffered, defer: false)
+        p.level = .floating
+        p.isFloatingPanel = true
+        p.hidesOnDeactivate = false
+        p.becomesKeyOnlyIfNeeded = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        panel = p
+
+        let root = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        root.material = .popover
+        root.blendingMode = .behindWindow
+        root.state = .active
+        root.wantsLayer = true
+        root.layer?.cornerRadius = 14
+        root.layer?.borderWidth = 1
+        root.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.65).cgColor
+        root.setAccessibilityElement(true)
+        root.setAccessibilityRole(.group)
+        root.setAccessibilityLabel("\(titleText)。\(bodyText)")
+        p.contentView = root
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: titleText)
+        icon.contentTintColor = color
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 22, weight: .medium)
+
+        let title = NSTextField(labelWithString: titleText)
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.textColor = .labelColor
+
+        let body = NSTextField(wrappingLabelWithString: bodyText)
+        body.translatesAutoresizingMaskIntoConstraints = false
+        body.font = .systemFont(ofSize: 12)
+        body.textColor = .secondaryLabelColor
+        body.maximumNumberOfLines = 2
+
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark",
+                                             accessibilityDescription: "关闭")!,
+                             target: self, action: #selector(closeToast))
+        close.translatesAutoresizingMaskIntoConstraints = false
+        close.isBordered = false
+        close.contentTintColor = .secondaryLabelColor
+
+        [icon, title, body, close].forEach(root.addSubview)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            icon.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 26),
+            icon.heightAnchor.constraint(equalToConstant: 26),
+
+            close.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11),
+            close.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+            close.widthAnchor.constraint(equalToConstant: 20),
+            close.heightAnchor.constraint(equalToConstant: 20),
+
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -10),
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+
+            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 5)
+        ])
+    }
+
+    func show() {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let finalOrigin = NSPoint(x: visible.maxX - panel.frame.width - 22,
+                                  y: visible.maxY - panel.frame.height - 14)
+        panel.setFrameOrigin(NSPoint(x: finalOrigin.x, y: finalOrigin.y + 14))
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+            panel.animator().setFrameOrigin(finalOrigin)
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: false) { [weak self] _ in
+            self?.dismiss()
+        }
+    }
+
+    func dismiss() {
+        timer?.invalidate(); timer = nil
+        guard panel.isVisible else { onDismiss(); return }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            panel.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self else { return }
+            self.panel.orderOut(nil)
+            self.onDismiss()
+        })
+    }
+
+    @objc private func closeToast() { dismiss() }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var uiTimer: Timer?
@@ -362,6 +484,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var phase: String?          // 非 nil = 正在检测(内部分两步，不暴露给用户)
     var updateTimer: Timer?
     var updateToast: UpdateToastController?
+    var feedbackToast: FeedbackToastController?
+    var feedbackToastToken = UUID()
+    var isCheckingUpdate = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
         // 上次升级若被 kickstart 打断，状态文件可能残留，启动时先清掉
@@ -379,10 +504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 定时主动检测(默认 1 分钟，可在菜单"检测间隔"调整)
         startScanTimer()
         // 版本检查: 启动时一次，之后每 2 小时。GitHub API 匿名限额 60 次/小时，这个频率很安全
-        runScript(["--check"], upgradeScriptPath) { [weak self] in self?.refresh() }
+        runScript(["--check"], upgradeScriptPath) { [weak self] _ in self?.refresh() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.runScript(["--check"], upgradeScriptPath) { [weak self] in self?.refresh() }
+            self.runScript(["--check"], upgradeScriptPath) { [weak self] _ in self?.refresh() }
         }
     }
 
@@ -405,7 +530,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refresh()
     }
 
-    func runScript(_ args: [String], _ path: String = scriptPath, isScan: Bool = false, then: (() -> Void)? = nil) {
+    func runScript(_ args: [String], _ path: String = scriptPath, isScan: Bool = false,
+                   then: ((Int32) -> Void)? = nil) {
         // 定时器、启动检测和“立即检测”可能同时触发。出口检测只保留一个进程；
         // shell 侧还有跨进程锁，防止 launchd 或其它入口与 App 竞争写状态。
         if isScan, scanProcess != nil { return }
@@ -417,11 +543,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         env["AUTO_TZ_DIR"] = baseDir   // 与脚本共用同一数据目录
         p.environment = env
         if isScan { scanProcess = p }
-        p.terminationHandler = { [weak self] _ in
+        p.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
                 if isScan { self?.scanProcess = nil }
                 self?.refresh()
-                then?()
+                then?(process.terminationStatus)
             }
         }
         do {
@@ -429,7 +555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             if isScan { scanProcess = nil }
             refresh()
-            then?()
+            then?(-1)
         }
     }
 
@@ -489,10 +615,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 图标要反映"这台机器现在能不能安全跑 Claude"，而不只是三路 IP 一致性 ——
         // 光看 IP 一致但分数掉到 60 分，图标还是绿的，等于没提醒。
         let cs = readStatus(claudeStatusPath)
+        let cps = readStatus(claudeProbeStatePath)
         let claudeScore = Int(cs["score"] ?? "") ?? -1
+        let scoreVerifying = cps["state"] == "verifying"
         let safe = claudeScore >= 90 && consistent == "1" && network == "ok"
         // 网络结果还在复核时不改变安全档位，也不发送“不可用/恢复”通知。
-        if network == "ok" {
+        if network == "ok" && !scoreVerifying {
             alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
         }
 
@@ -645,8 +773,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(colored("⬆ 升级到 v\(latest)", .systemBlue, #selector(doUpgrade)))
             notifyNewVersion(latest)
         } else {
-            menu.addItem(disabled("版本 v\(ver)（已是最新）"))
-            menu.addItem(action("检查更新", #selector(checkUpdate)))
+            let versionState = u["checkok"] == "0" ? "更新状态未知" : "已是最新"
+            menu.addItem(disabled("版本 v\(ver)（\(versionState)）"))
+            menu.addItem(isCheckingUpdate
+                ? disabled("正在检查更新…")
+                : action("检查更新", #selector(checkUpdate)))
         }
         menu.addItem(.separator())
         menu.addItem(action("官方网站", #selector(openYinso)))
@@ -749,38 +880,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // 体检分两步: ① 系统检测(本地信号，1~2 秒出结果) ② 浏览器指纹采集(后台开标签，采完自动关)
-    // 第二步失败或用户关掉时，回退到内置 WKWebView 采集，保证浏览器组始终有数据。
+    // 先采浏览器指纹，再只运行一次完整评分。检测期间保留上次有效分数，
+    // 不再把缺少浏览器信号的中间分数写进菜单并触发假告警。
     func fullCheck(_ args: [String] = ["--quiet"]) {
         guard phase == nil else { return }           // 正在检测就别叠加
-        phase = "1/2 系统检测"
-        refresh()
-        runScript(args, claudeScriptPath) { [weak self] in
-            guard let self else { return }
-            guard self.browserProbeEnabled else { self.phase = nil; self.refresh(); return }
-            self.phase = "2/2 浏览器指纹"
-            self.refresh()
-            self.bridge = BrowserBridge(outPath: browserPath) { [weak self] ok in
-                guard let self else { return }
-                self.bridge = nil
-                if ok {
-                    // 拿到真实浏览器指纹，重跑一次评分把这组信号合进去
-                    self.runScript(["--quiet"], claudeScriptPath) { self.phase = nil; self.refresh() }
-                } else {
-                    self.fallbackWebView()
-                }
-            }
-            self.bridge?.start()
+        guard browserProbeEnabled else {
+            phase = "系统检测"
+            refresh()
+            runScript(args, claudeScriptPath) { [weak self] _ in self?.phase = nil; self?.refresh() }
+            return
         }
+        phase = "浏览器指纹"
+        refresh()
+        bridge = BrowserBridge(outPath: browserPath) { [weak self] ok in
+            guard let self else { return }
+            self.bridge = nil
+            if ok {
+                self.phase = "系统检测"
+                self.refresh()
+                self.runScript(args, claudeScriptPath) { [weak self] _ in
+                    self?.phase = nil
+                    self?.refresh()
+                }
+            } else {
+                self.fallbackWebView(args)
+            }
+        }
+        bridge?.start()
     }
 
     // 真实浏览器没回传时的兜底: 用内置 WKWebView 采一份(拿不到 Client Hints，但总比没有强)
-    func fallbackWebView() {
+    func fallbackWebView(_ args: [String] = ["--quiet"]) {
         guard probe == nil else { phase = nil; refresh(); return }
         probe = BrowserProbe(outPath: browserPath) { [weak self] in
             guard let self else { return }
             self.probe = nil
-            self.runScript(["--quiet"], claudeScriptPath) { self.phase = nil; self.refresh() }
+            self.phase = "系统检测"
+            self.refresh()
+            self.runScript(args, claudeScriptPath) { [weak self] _ in
+                self?.phase = nil
+                self?.refresh()
+            }
         }
         probe?.run()
     }
@@ -793,6 +933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func claudeMenuItem() -> NSMenuItem {
         let c = readStatus(claudeStatusPath)
+        let probeState = readStatus(claudeProbeStatePath)
         let score = Int(c["score"] ?? "") ?? -1
         let grade = c["grade"] ?? ""
         let exitConsistent = c["consistent"] == "1"
@@ -803,7 +944,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let dot = score < 0 ? "⚪️" : (isSafe ? "🟢" : (isWarning ? "🟠" : "🔴"))
         let riskColor: NSColor = isSafe ? .labelColor : (isWarning ? .systemOrange : .systemRed)
         // 提分详情在子菜单顶部，标题只报状态，不啰嗦
-        let title = score < 0 ? "Claude 环境体检" : "Claude 环境 \(dot) \(score) 分 · \(grade)"
+        let verifying = probeState["state"] == "verifying"
+        let title = score < 0 ? "Claude 环境体检"
+            : "Claude 环境 \(dot) \(score) 分 · \(verifying ? "复核中" : grade)"
         let unfit = score >= 0 && !isSafe
         let alertColor: NSColor = score < 0 ? .labelColor : riskColor
 
@@ -811,6 +954,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if score < 0 {
             sub.addItem(disabled("尚未体检"))
         } else {
+            if verifying {
+                let candidate = probeState["candidate_score"] ?? "?"
+                let count = probeState["failure_count"] ?? "1"
+                let required = probeState["confirm_required"] ?? "2"
+                sub.addItem(colored("探测波动：保留上次 \(score) 分", .systemOrange))
+                sub.addItem(disabled("候选 \(candidate) 分 · 复核 \(count)/\(required)"))
+                if let detail = probeState["detail"], !detail.isEmpty {
+                    sub.addItem(disabled(detail))
+                }
+                sub.addItem(.separator())
+            }
             sub.addItem(unfit ? colored(c["verdict"] ?? "", riskColor) : disabled(c["verdict"] ?? ""))
 
             // 提分清单放最前面，橙色可点，别埋在明细里跟着一起变灰
@@ -931,7 +1085,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         upgradeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.refresh()
         }
-        runScript(["--install"], upgradeScriptPath) { [weak self] in
+        runScript(["--install"], upgradeScriptPath) { [weak self] _ in
             guard let self else { return }
             self.upgradeTimer?.invalidate(); self.upgradeTimer = nil
             let st = (try? String(contentsOfFile: upgradeStatePath, encoding: .utf8))?
@@ -978,15 +1132,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func presentFeedback(symbol: String, color: NSColor, title: String, body: String) {
+        feedbackToast?.dismiss()
+        let token = UUID()
+        feedbackToastToken = token
+        let toast = FeedbackToastController(symbol: symbol, color: color,
+            titleText: title, bodyText: body,
+            onDismiss: { [weak self] in
+                guard let self, self.feedbackToastToken == token else { return }
+                self.feedbackToast = nil
+            })
+        feedbackToast = toast
+        toast.show()
+    }
+
     @objc func checkUpdate() {
-        notify("正在检查更新…", "")
-        runScript(["--check"], upgradeScriptPath) { [weak self] in
+        guard !isCheckingUpdate else { return }
+        isCheckingUpdate = true
+        let startedAt = Int(Date().timeIntervalSince1970)
+        refresh()
+        runScript(["--check"], upgradeScriptPath) { [weak self] exitCode in
             guard let self else { return }
+            self.isCheckingUpdate = false
             let u = self.readStatus(updatePath)
-            if u["hasupdate"] == "1", let l = u["latest"] {
+            let checkedAt = Int(u["checkedat"] ?? "") ?? 0
+            if exitCode != 0 || u["checkok"] != "1" || checkedAt < startedAt {
+                self.presentFeedback(symbol: "wifi.exclamationmark", color: .systemOrange,
+                    title: "检查更新失败",
+                    body: u["error"] ?? "无法连接 GitHub，请检查网络后重试。")
+            } else if u["hasupdate"] == "1", let l = u["latest"] {
                 self.presentUpdateToast(l, throttled: false)
             } else {
-                self.notify("已经是最新版本", "v\(u["current"] ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"))")
+                let current = u["current"] ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?")
+                self.presentFeedback(symbol: "checkmark.circle.fill", color: .systemGreen,
+                    title: "已经是最新版本", body: "当前版本 v\(current)。")
             }
             self.refresh()
         }
@@ -1001,7 +1180,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
     }
 
-    @objc func quit() { NSApp.terminate(nil) }
+    // v4.3 及更早版本把 LaunchAgent 配成 KeepAlive，正常退出也会被 launchd 立即拉起。
+    // 退出前先把磁盘配置迁移成“仅登录时启动”，再由独立 helper 卸载仍在内存里的旧任务。
+    func prepareLaunchAgentForRealQuit() {
+        let fm = FileManager.default
+        let launchAgents = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        let currentLabel = "com.example.checkclaude"
+        let legacyLabel = "com.hx10.checkclaude"
+        let currentPlist = launchAgents.appendingPathComponent("\(currentLabel).plist")
+        let legacyPlist = launchAgents.appendingPathComponent("\(legacyLabel).plist")
+        guard fm.fileExists(atPath: currentPlist.path) || fm.fileExists(atPath: legacyPlist.path) else { return }
+
+        try? fm.createDirectory(at: launchAgents, withIntermediateDirectories: true)
+        let executable = Bundle.main.executablePath
+            ?? "/Applications/CheckClaude.app/Contents/MacOS/CheckClaude"
+        let plist: [String: Any] = [
+            "Label": currentLabel,
+            "ProgramArguments": [executable],
+            "RunAtLoad": true
+        ]
+        if let data = try? PropertyListSerialization.data(fromPropertyList: plist,
+                                                           format: .xml, options: 0) {
+            do {
+                try data.write(to: currentPlist, options: .atomic)
+                try? fm.removeItem(at: legacyPlist)
+            } catch {
+                return
+            }
+        }
+
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/bash")
+        helper.arguments = ["-c", """
+            sleep 0.25
+            launchctl bootout gui/\(getuid())/\(legacyLabel) 2>/dev/null || true
+            launchctl bootout gui/\(getuid())/\(currentLabel) 2>/dev/null || true
+            """]
+        helper.standardOutput = FileHandle.nullDevice
+        helper.standardError = FileHandle.nullDevice
+        try? helper.run()
+    }
+
+    @objc func quit() {
+        prepareLaunchAgentForRealQuit()
+        NSApp.terminate(nil)
+    }
 }
 
 // 浏览器端信号采集: 用一个隐藏的 WKWebView 跑检测 JS，拿 shell 拿不到的那部分信号

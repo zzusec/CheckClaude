@@ -24,6 +24,7 @@ USTATUS="$DATA_DIR/update_status"
 USTATE="$DATA_DIR/upgrade_state"      # 升级进行到哪一步，菜单栏据此显示进度
 LOG="$DATA_DIR/auto-timezone.log"
 AGENT="com.example.checkclaude"
+LEGACY_AGENT="com.hx10.checkclaude"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG" 2>/dev/null || true; }
 state() { echo "$1" >"$USTATE" 2>/dev/null || true; }
@@ -74,6 +75,22 @@ status_value() {
   sed -n "s/^${key}=//p" "$USTATUS" | head -1
 }
 
+write_update_status() {
+  local current="$1" latest="$2" up="$3" url="$4" check_ok="$5" error="$6"
+  local tmp="${USTATUS}.tmp.$$"
+  {
+    echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "checkedat=$(date +%s)"
+    echo "current=${current:-?}"
+    echo "latest=${latest:-?}"
+    echo "hasupdate=${up:-0}"
+    echo "url=${url}"
+    echo "checkok=${check_ok}"
+    echo "error=${error}"
+  } >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$USTATUS" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
 # 语义化比较: 有更新才返回 0。sort -V 能正确处理 2.9 < 2.10
 has_update() {
   local cur="$1" latest="$2" newest
@@ -83,25 +100,23 @@ has_update() {
 }
 
 do_check() {
-  local cur latest url info up=0
+  local cur latest url info up=0 old_latest old_url old_up
   cur=$(current_version)
   info=$(latest_release || true)
   latest=${info%%$'\t'*}
   if [[ "$info" == *$'\t'* ]]; then url=${info#*$'\t'}; else url=""; fi
   if [[ -z "$latest" || -z "$url" ]]; then
-    # 查不到就别覆盖上一次的结果，网络抖动不该让升级提示忽隐忽现。
+    # 保留上一次已知版本/下载地址供自动升级使用，但明确标记本次失败，
+    # 菜单不能再拿旧缓存冒充“本次检查成功”。
+    old_latest=$(status_value latest || true)
+    old_url=$(status_value url || true)
+    old_up=$(status_value hasupdate || true)
+    write_update_status "$cur" "${old_latest:-?}" "${old_up:-0}" "$old_url" 0 "无法连接 GitHub，请检查网络后重试"
     log "upgrade: 查询最新版本或 DMG 资产失败"
-    [[ -f "$USTATUS" ]] && exit 0
-    latest="?"; url=""
+    return 2
   fi
   has_update "$cur" "$latest" && up=1
-  {
-    echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "current=${cur:-?}"
-    echo "latest=${latest}"
-    echo "hasupdate=${up}"
-    echo "url=${url}"
-  } >"$USTATUS" 2>/dev/null
+  write_update_status "$cur" "$latest" "$up" "$url" 1 ""
   log "upgrade: 当前 ${cur:-?} 最新 ${latest} 有更新=${up}"
   echo "${up}"
 }
@@ -200,29 +215,41 @@ do_install() {
 
   log "upgrade: ${cur} -> ${latest} 安装完成"
   notify "CheckClaude 已升级" "${cur} → ${latest}，正在重启"
-  {
-    echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "current=${latest}"
-    echo "latest=${latest}"
-    echo "hasupdate=0"
-    echo "url=${url}"
-  } >"$USTATUS" 2>/dev/null
+  write_update_status "$latest" "$latest" 0 "$url" 1 ""
   rm -f "$USTATE"
 
-  # LaunchAgent 安装和手动双击两种启动方式都覆盖。
+  # v4.4 起 LaunchAgent 只负责登录时启动，不再 KeepAlive；用户点“退出”必须真正退出。
+  # 用延迟 helper 结束旧进程、迁移旧 com.hx10 标识并显式启动一次新版。
   if [[ "${CHECKCLAUDE_NO_RELAUNCH:-0}" != "1" ]]; then
-    if ! launchctl kickstart -k "gui/$(id -u)/${AGENT}" 2>/dev/null; then
-      pkill -f "$APP/Contents/MacOS/CheckClaude" 2>/dev/null || true
+    (
       sleep 1
-      # 必须按完整路径打开；open -a 会按名称/Bundle ID 查找，可能误启动仓库构建副本或旧备份。
-      open "$APP" 2>/dev/null || true
-    fi
+      uid=$(id -u)
+      for id in "$AGENT" "$LEGACY_AGENT"; do
+        launchctl bootout "gui/${uid}/${id}" 2>/dev/null || true
+      done
+      pkill -x CheckClaude 2>/dev/null || true
+      mkdir -p "$HOME/Library/LaunchAgents"
+      rm -f "$HOME/Library/LaunchAgents/$LEGACY_AGENT.plist"
+      cat >"$HOME/Library/LaunchAgents/$AGENT.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>$AGENT</string>
+<key>ProgramArguments</key><array><string>$APP/Contents/MacOS/CheckClaude</string></array>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+PLIST
+      launchctl bootstrap "gui/${uid}" "$HOME/Library/LaunchAgents/$AGENT.plist" 2>/dev/null \
+        || open "$APP" 2>/dev/null || true
+    ) >/dev/null 2>&1 &
   fi
   echo "✅ 已升级到 v${latest}"
 }
 
-case "${1:---check}" in
-  --check)   do_check ;;
-  --install) do_install ;;
-  *) echo "用法: $0 [--check|--install]"; exit 1 ;;
-esac
+if [[ "${UPGRADE_SELFTEST:-0}" != "1" ]]; then
+  case "${1:---check}" in
+    --check)   do_check ;;
+    --install) do_install ;;
+    *) echo "用法: $0 [--check|--install]"; exit 1 ;;
+  esac
+fi

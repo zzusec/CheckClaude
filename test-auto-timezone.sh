@@ -137,6 +137,19 @@ check "只标记一次已确认换 IP" "$(awk -F'|' '$5 == 1 {n++} END {print n+
 TMP_COUNT=$(find "$TEST_DIR" -maxdepth 1 -name '*.tmp.*' | wc -l | tr -d ' ')
 check "没有临时文件残留" "$TMP_COUNT" "0"
 
+printf '%s\n' '⑩ 同一 IP 的时区变化连续两次才接受'
+STABLE_TIMEZONE="America/Los_Angeles"
+SNAP_GFWTZ="America/Los_Angeles"
+PENDING_TIMEZONE=""; PENDING_TZ_COUNT=0; TIMEZONE_DETAIL=""
+confirm_timezone_candidate "$NEW_IP" "$NEW_IP" "America/New_York" || true
+check "第一次时区跳变沿用旧值" "$CONFIRMED_TIMEZONE" "America/Los_Angeles"
+check "记录时区候选 1/2" "$PENDING_TZ_COUNT" "1"
+check "给出时区复核提示" "$(echo "$TIMEZONE_DETAIL" | grep -c '复核中')" "1"
+confirm_timezone_candidate "$NEW_IP" "$NEW_IP" "America/New_York" || true
+check "第二次相同结果才接受" "$CONFIRMED_TIMEZONE" "America/New_York"
+check "更新稳定时区" "$STABLE_TIMEZONE" "America/New_York"
+check "时区候选计数清零" "$PENDING_TZ_COUNT" "0"
+
 if [[ $FAIL -eq 0 ]]; then
   echo
   echo "全部通过"
