@@ -6,14 +6,14 @@
 #   1) 国内视角   —— 访问国内网站时对方看到的 IP
 #   2) 国外视角   —— 访问未被封的国外网站时对方看到的 IP
 #   3) 被封/谷歌  —— 访问谷歌等被封网站时对方看到的 IP
-# 三者一致 => 才是干净的真实出口 IP，按它设时区；
-# 三者不一致 => 说明在分流/PAC 等模式，出口 IP 有问题，默认不改时区并报警。
+# 三者一致 => 是干净的真实出口 IP；三者不一致 => 说明可能存在分流/PAC/泄漏。
+# 系统时区始终以“被封/谷歌侧”实际出口为权威，和三路一致性检测独立防抖、独立修正。
 #
 # 用法：
-#   ./auto-timezone.sh            # 检测一致性 -> 一致才设时区
+#   ./auto-timezone.sh            # 检测一致性，并按谷歌侧出口自动校正时区
 #   ./auto-timezone.sh --check    # 只做三路一致性检测并打印，不改时区
 #   ./auto-timezone.sh --dry-run  # 检测 + 显示将要改的时区，但不实际改
-#   ./auto-timezone.sh --force    # 即使不一致，也按“国外视角”出口设时区
+#   ./auto-timezone.sh --force    # 兼容旧参数；时区始终按谷歌侧出口校正
 #   ./auto-timezone.sh --once     # 同默认，供 launchd 调用
 
 set -uo pipefail
@@ -73,7 +73,11 @@ is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
 write_status() {
   local consistent="$1" cn="$2" intl="$3" gfw="$4" google="$5" gfwtz="$6"
   local network="$7" failures="$8" confirmations="$9" detail="${10}" last_success="${11}"
-  local tmp="${STATUS}.tmp.$$"
+  local tmp="${STATUS}.tmp.$$" current_tz timezone_synced="?"
+  current_tz=$(current_timezone)
+  if [[ "$gfwtz" == */* ]]; then
+    [[ "$current_tz" == "$gfwtz" ]] && timezone_synced=1 || timezone_synced=0
+  fi
   {
     echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
     echo "consistent=$consistent"
@@ -82,7 +86,9 @@ write_status() {
     echo "gfw=$gfw"
     echo "google=$google"
     echo "gfwtz=$gfwtz"
-    echo "tz=$(current_timezone)"
+    echo "tz=$current_tz"
+    echo "timezone_ip=${TIMEZONE_IP:-}"
+    echo "timezone_synced=$timezone_synced"
     echo "network=$network"
     echo "failure_count=$failures"
     echo "confirm_count=$confirmations"
@@ -107,6 +113,9 @@ write_probe_state() {
     echo "network=$NETWORK_STATE"
     echo "last_success=$LAST_SUCCESS"
     echo "stable_timezone=$STABLE_TIMEZONE"
+    echo "timezone_ip=$TIMEZONE_IP"
+    echo "pending_timezone_ip=$PENDING_TIMEZONE_IP"
+    echo "pending_timezone_ip_count=$PENDING_TIMEZONE_IP_COUNT"
     echo "pending_timezone=$PENDING_TIMEZONE"
     echo "pending_timezone_count=$PENDING_TZ_COUNT"
   } >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
@@ -119,7 +128,8 @@ write_confirmed_state() {
   mv -f "$tmp" "$STATE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
 
-# 一行一个检测样本：epoch|总耗时|结果|出口IP|是否换IP|国内耗时|国内成功|国外耗时|国外成功|谷歌侧耗时|谷歌侧成功|Google耗时|Google成功
+# 一行一个检测样本。前 13 列兼容旧版；后 16 列为四路 HTTPS/TCP 指标：
+# 每路依次追加 TCP connect、TLS、TTFB、HTTP 状态码（耗时单位均为秒）。
 # 写入时顺便裁掉 24 小时以前的数据，并限制最多 5000 行，手动频繁检测也不会无限增长。
 record_history() {
   local result="$1" ip="$2" changed="$3"
@@ -129,10 +139,14 @@ record_history() {
     if [[ -f "$HISTORY" ]]; then
       awk -F'|' -v cutoff="$cutoff" '$1 ~ /^[0-9]+$/ && $1 >= cutoff' "$HISTORY" 2>/dev/null | tail -n 4999
     fi
-    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "$now" "$PROBE_SECONDS" "$result" "${ip:-?}" "$changed" \
       "$CN_SECONDS" "$CN_OK" "$INTL_SECONDS" "$INTL_OK" \
-      "$GFW_SECONDS" "$GFW_OK" "$GOOGLE_SECONDS" "$GOOGLE_OK"
+      "$GFW_SECONDS" "$GFW_OK" "$GOOGLE_SECONDS" "$GOOGLE_OK" \
+      "$CN_CONNECT_SECONDS" "$CN_TLS_SECONDS" "$CN_TTFB_SECONDS" "$CN_HTTP_CODE" \
+      "$INTL_CONNECT_SECONDS" "$INTL_TLS_SECONDS" "$INTL_TTFB_SECONDS" "$INTL_HTTP_CODE" \
+      "$GFW_CONNECT_SECONDS" "$GFW_TLS_SECONDS" "$GFW_TTFB_SECONDS" "$GFW_HTTP_CODE" \
+      "$GOOGLE_CONNECT_SECONDS" "$GOOGLE_TLS_SECONDS" "$GOOGLE_TTFB_SECONDS" "$GOOGLE_HTTP_CODE"
   } >"$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$HISTORY" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
@@ -154,8 +168,9 @@ read_snapshot() {
 
 load_probe_state() {
   STABLE_IP=""; STABLE_CONSISTENT=""; FAILURE_COUNT=0; PENDING_KEY=""; PENDING_COUNT=0
-  NETWORK_STATE="ok"; LAST_SUCCESS=""; STABLE_TIMEZONE=""; PENDING_TIMEZONE=""
-  PENDING_TZ_COUNT=0; TIMEZONE_DETAIL=""
+  NETWORK_STATE="ok"; LAST_SUCCESS=""; STABLE_TIMEZONE=""; TIMEZONE_IP=""
+  PENDING_TIMEZONE_IP=""; PENDING_TIMEZONE_IP_COUNT=0
+  PENDING_TIMEZONE=""; PENDING_TZ_COUNT=0; TIMEZONE_DETAIL=""
   local k v
   if [[ -f "$PROBE_STATE" ]]; then
     while IFS='=' read -r k v; do
@@ -164,13 +179,17 @@ load_probe_state() {
         failure_count) FAILURE_COUNT="$v" ;; pending_key) PENDING_KEY="$v" ;;
         pending_count) PENDING_COUNT="$v" ;; network) NETWORK_STATE="$v" ;;
         last_success) LAST_SUCCESS="$v" ;;
-        stable_timezone) STABLE_TIMEZONE="$v" ;; pending_timezone) PENDING_TIMEZONE="$v" ;;
+        stable_timezone) STABLE_TIMEZONE="$v" ;; timezone_ip) TIMEZONE_IP="$v" ;;
+        pending_timezone_ip) PENDING_TIMEZONE_IP="$v" ;;
+        pending_timezone_ip_count) PENDING_TIMEZONE_IP_COUNT="$v" ;;
+        pending_timezone) PENDING_TIMEZONE="$v" ;;
         pending_timezone_count) PENDING_TZ_COUNT="$v" ;;
       esac
     done <"$PROBE_STATE"
   fi
   [[ "$FAILURE_COUNT" =~ ^[0-9]+$ ]] || FAILURE_COUNT=0
   [[ "$PENDING_COUNT" =~ ^[0-9]+$ ]] || PENDING_COUNT=0
+  [[ "$PENDING_TIMEZONE_IP_COUNT" =~ ^[0-9]+$ ]] || PENDING_TIMEZONE_IP_COUNT=0
   [[ "$PENDING_TZ_COUNT" =~ ^[0-9]+$ ]] || PENDING_TZ_COUNT=0
 
   # 从旧版本升级时没有 probe_state；用既有 last_state/status 建立有效基线，避免首次失败清空 IP。
@@ -186,6 +205,12 @@ load_probe_state() {
   [[ -n "$LAST_SUCCESS" ]] || LAST_SUCCESS="$SNAP_LAST_SUCCESS"
   [[ -n "$STABLE_CONSISTENT" ]] || STABLE_CONSISTENT="$SNAP_CONSISTENT"
   [[ -n "$STABLE_TIMEZONE" ]] || STABLE_TIMEZONE="$SNAP_GFWTZ"
+  # v4.4 以前没有独立的时区权威出口；可从已确认谷歌侧出口平滑迁移。
+  if [[ -z "$TIMEZONE_IP" ]]; then
+    if is_ipv4 "$SNAP_GFW"; then TIMEZONE_IP="$SNAP_GFW"
+    elif is_ipv4 "$STABLE_IP"; then TIMEZONE_IP="$STABLE_IP"
+    fi
+  fi
 }
 
 # 网络暂时失败时保留上次确认的三路 IP；没有历史时才显示本次拿到的部分结果。
@@ -196,7 +221,7 @@ write_preserved_status() {
   local out_intl="${SNAP_INTL:-${intl:-?}}"
   local out_gfw="${SNAP_GFW:-${gfw:-?}}"
   local out_google="${goog:-${SNAP_GOOGLE:-?}}"
-  local out_gfwtz="${SNAP_GFWTZ:-?}"
+  local out_gfwtz="${STABLE_TIMEZONE:-${SNAP_GFWTZ:-?}}"
   write_status "$out_consistent" "$out_cn" "$out_intl" "$out_gfw" "$out_google" \
     "$out_gfwtz" "$network" "$failures" "$confirmations" "$detail" "$LAST_SUCCESS"
 }
@@ -221,33 +246,48 @@ acquire_lock() {
 
 release_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 
-CURL='curl -fsS --max-time 9 -A Mozilla/5.0'
+CURL='curl -LfsS --connect-timeout 5 --max-time 9 -A Mozilla/5.0'
 
-# 从一组候选 URL 里取到第一个合法 IPv4 就返回。
+is_decimal() { [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]]; }
+normal_decimal() { is_decimal "$1" && printf '%s' "$1" || printf '0'; }
+sum_decimal() { awk -v a="$(normal_decimal "$1")" -v b="$(normal_decimal "$2")" 'BEGIN { printf "%.6f", a + b }'; }
+
+# 从一组 HTTPS 候选 URL 里取到第一个合法 IPv4，并返回该次 HTTPS/TCP 指标：
+# IP|TCP connect|TLS|TTFB|累计 total|HTTP code。失败也返回累计耗时，便于趋势图反映真实波动。
 get_first_ip() {
-  local url ip
+  local url ip body_file metrics connect tls ttfb total code
+  local accumulated="0" last_code="000"
   for url in "$@"; do
-    ip=$($CURL "$url" 2>/dev/null \
-          | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
-    if is_ipv4 "$ip"; then
-      echo "$ip"; return 0
+    body_file=$(mktemp "$DATA_DIR/.https-probe.XXXXXX") || return 1
+    metrics=$($CURL -o "$body_file" \
+      -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{http_code}' \
+      "$url" 2>/dev/null) || true
+    IFS='|' read -r connect tls ttfb total code <<<"$metrics"
+    connect=$(normal_decimal "$connect"); tls=$(normal_decimal "$tls")
+    ttfb=$(normal_decimal "$ttfb"); total=$(normal_decimal "$total")
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    accumulated=$(sum_decimal "$accumulated" "$total")
+    last_code="$code"
+    ip=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$body_file" 2>/dev/null | head -1)
+    rm -f "$body_file" 2>/dev/null || true
+    if is_ipv4 "$ip" && [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
+      printf '%s|%s|%s|%s|%s|%s\n' "$ip" "$connect" "$tls" "$ttfb" "$accumulated" "$code"
+      return 0
     fi
   done
+  printf '?|0|0|0|%s|%s\n' "$accumulated" "$last_code"
   return 1
 }
 
-# 国内视角：国内服务器回显的来源 IP（多接口兜底）。
-# 首选 HTTP 明文接口，绕过系统 curl（老 LibreSSL）对部分国内 HTTPS 站的握手失败。
+# 四路质量探测都使用 HTTPS over TCP，不再用 ICMP/ping，也不再用明文 HTTP。
 ip_china() {
   get_first_ip \
-    "http://members.3322.org/dyndns/getip" \
+    "https://ip.3322.net" \
     "https://whois.pconline.com.cn/ipJson.jsp?json=true" \
-    "https://qifu-api.baidubce.com/ip/local/geo/v1/district" \
     "https://api.live.bilibili.com/xlive/web-room/v1/index/getIpInfo" \
-    "http://www.taobao.com/help/getip.php"
+    "https://myip.ipip.net"
 }
 
-# 国外（未被封）视角。
 ip_intl() {
   get_first_ip \
     "https://api.ipify.org" \
@@ -256,7 +296,7 @@ ip_intl() {
     "https://ifconfig.me/ip"
 }
 
-# 被封/谷歌侧视角：走需要“翻墙”才能到达的目的地。
+# 被封/谷歌侧视角：作为 Claude/Google 实际路径与系统时区的权威出口。
 ip_gfw() {
   get_first_ip \
     "https://www.cloudflare.com/cdn-cgi/trace" \
@@ -264,11 +304,38 @@ ip_gfw() {
     "https://api.myip.com"
 }
 
-# 谷歌是否真的可达（可达=被封网站这条路通）。
+# Google HTTPS 204 同时返回 TCP/TLS/TTFB/total/HTTP code；返回值表示线路是否可用。
 google_reachable() {
-  local code
-  code=$($CURL -o /dev/null -w '%{http_code}' "https://www.google.com/generate_204" 2>/dev/null)
+  local metrics connect tls ttfb total code
+  metrics=$($CURL -o /dev/null \
+    -w '%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{http_code}' \
+    "https://www.google.com/generate_204" 2>/dev/null) || true
+  IFS='|' read -r connect tls ttfb total code <<<"$metrics"
+  printf '%s|%s|%s|%s|%s\n' \
+    "$(normal_decimal "$connect")" "$(normal_decimal "$tls")" \
+    "$(normal_decimal "$ttfb")" "$(normal_decimal "$total")" "${code:-000}"
   [[ "$code" == "204" || "$code" == "200" ]]
+}
+
+# 解析单路探测结果并写入统一指标变量；测试桩只返回 IP 时也保持兼容。
+run_ip_route() {
+  local prefix="$1" func="$2" payload="" rc=0 ip connect tls ttfb total code
+  payload=$($func) || rc=$?
+  if [[ "$payload" == *'|'* ]]; then
+    IFS='|' read -r ip connect tls ttfb total code <<<"$payload"
+  else
+    ip="$payload"; connect=0; tls=0; ttfb=0; total=0; code=0
+  fi
+  is_ipv4 "$ip" || ip=""
+  [[ $rc -eq 0 && -n "$ip" ]] || rc=1
+  printf -v ROUTE_IP '%s' "$ip"
+  printf -v "${prefix}_CONNECT_SECONDS" '%s' "$(normal_decimal "$connect")"
+  printf -v "${prefix}_TLS_SECONDS" '%s' "$(normal_decimal "$tls")"
+  printf -v "${prefix}_TTFB_SECONDS" '%s' "$(normal_decimal "$ttfb")"
+  printf -v "${prefix}_SECONDS" '%s' "$(normal_decimal "$total")"
+  [[ "$code" =~ ^[0-9]{3}$ ]] || code=0
+  printf -v "${prefix}_HTTP_CODE" '%s' "$code"
+  [[ $rc -eq 0 ]]
 }
 
 # 用 IANA 时区库文件校验时区合法（无需 sudo）。
@@ -281,7 +348,7 @@ current_timezone() {
   echo "${tz:-(unknown)}"
 }
 
-# 取某个 IP 对应的 IANA 时区。优先 ipinfo.io，再退回 ipapi.co / ip-api.com。
+# 取某个 IP 对应的 IANA 时区。三路情报均使用 HTTPS。
 ip_timezone() {
   local ip="$1" tz
   tz=$($CURL "https://ipinfo.io/${ip}/json" 2>/dev/null \
@@ -290,7 +357,9 @@ ip_timezone() {
   [[ "$tz" == */* ]] && { echo "$tz"; return 0; }
   tz=$($CURL "https://ipapi.co/${ip}/timezone" 2>/dev/null)
   [[ "$tz" == */* ]] && { echo "$tz"; return 0; }
-  tz=$($CURL "http://ip-api.com/line/${ip}?fields=timezone" 2>/dev/null)
+  tz=$($CURL "https://ipwho.is/${ip}?fields=timezone" 2>/dev/null \
+        | grep -Eo '"id"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | grep -Eo '[A-Za-z_]+/[A-Za-z_/]+' | head -1)
   [[ "$tz" == */* ]] && { echo "$tz"; return 0; }
   return 1
 }
@@ -365,6 +434,58 @@ confirm_timezone_candidate() {
   return 0
 }
 
+
+# 谷歌侧出口独立于国内/国外辅助探针确认。这样即使辅助接口波动，只要实际
+# Claude/Google 路径连续两次确认，系统时区仍会自动修正并在以后每轮防漂移。
+sync_timezone_from_gfw() {
+  local candidate_ip="$1" previous_ip="$TIMEZONE_IP" raw_timezone="" target_timezone=""
+  is_ipv4 "$candidate_ip" || return 1
+
+  if [[ -n "$previous_ip" && "$candidate_ip" != "$previous_ip" ]]; then
+    if [[ "$PENDING_TIMEZONE_IP" == "$candidate_ip" ]]; then
+      PENDING_TIMEZONE_IP_COUNT=$(( PENDING_TIMEZONE_IP_COUNT + 1 ))
+    else
+      PENDING_TIMEZONE_IP="$candidate_ip"
+      PENDING_TIMEZONE_IP_COUNT=1
+    fi
+    if [[ $PENDING_TIMEZONE_IP_COUNT -lt $CONFIRM_REQUIRED ]]; then
+      TIMEZONE_DETAIL="时区权威出口变化复核中：${candidate_ip}（${PENDING_TIMEZONE_IP_COUNT}/${CONFIRM_REQUIRED}）"
+      log "⏳ 谷歌侧出口变化待确认：${previous_ip} -> ${candidate_ip}（${PENDING_TIMEZONE_IP_COUNT}/${CONFIRM_REQUIRED}），暂不修改系统时区"
+      return 1
+    fi
+  else
+    PENDING_TIMEZONE_IP=""
+    PENDING_TIMEZONE_IP_COUNT=0
+  fi
+
+  raw_timezone=$(ip_timezone "$candidate_ip") || raw_timezone=""
+  if [[ "$raw_timezone" != */* ]]; then
+    if [[ "$candidate_ip" == "$previous_ip" && "$STABLE_TIMEZONE" == */* ]]; then
+      raw_timezone="$STABLE_TIMEZONE"
+      log "  IP 时区接口暂时不可达，沿用已确认时区: ${raw_timezone}"
+    else
+      TIMEZONE_DETAIL="已确认谷歌侧出口 ${candidate_ip}，等待 HTTPS 时区情报"
+      log "无法解析谷歌侧出口 IP(${candidate_ip})的时区，保留当前系统时区并等待重试"
+      return 1
+    fi
+  fi
+
+  confirm_timezone_candidate "$candidate_ip" "$previous_ip" "$raw_timezone" || true
+  target_timezone="$CONFIRMED_TIMEZONE"
+  [[ "$target_timezone" == */* ]] || return 1
+
+  # IP 与 IANA 时区作为一对提交，避免新 IP 已写入但时区情报尚未就绪。
+  TIMEZONE_IP="$candidate_ip"
+  PENDING_TIMEZONE_IP=""
+  PENDING_TIMEZONE_IP_COUNT=0
+  log "  时区权威出口 ${TIMEZONE_IP} 对应 IANA 时区: ${target_timezone}"
+
+  if [[ "$MODE" != "check" ]]; then
+    apply_timezone "$target_timezone" || true
+  fi
+  return 0
+}
+
 handle_incomplete_probe() {
   FAILURE_COUNT=$(( FAILURE_COUNT + 1 ))
   PENDING_KEY=""; PENDING_COUNT=0
@@ -424,16 +545,8 @@ confirm_or_commit_probe() {
   FAILURE_COUNT=0; PENDING_KEY=""; PENDING_COUNT=0; NETWORK_STATE="ok"
   LAST_SUCCESS=$(date '+%Y-%m-%d %H:%M:%S')
 
-  local raw_gfwtz="" gfwtz=""
-  raw_gfwtz=$(ip_timezone "$tz_ip") || raw_gfwtz=""
-  # 同一已确认 IP 的时区情报接口偶发不可达时，沿用已有时区，避免菜单内容闪空。
-  if [[ -z "$raw_gfwtz" && "$tz_ip" == "$previous_stable" && "$STABLE_TIMEZONE" == */* ]]; then
-    raw_gfwtz="$STABLE_TIMEZONE"
-    log "  IP 时区接口暂时不可达，沿用上次时区: ${raw_gfwtz}"
-  fi
-  confirm_timezone_candidate "$tz_ip" "$previous_stable" "$raw_gfwtz" || true
-  gfwtz="$CONFIRMED_TIMEZONE"
-  log "  谷歌侧出口 ${tz_ip} 对应时区: ${raw_gfwtz:-解析失败}${TIMEZONE_DETAIL:+（暂沿用 ${gfwtz}）}"
+  local gfwtz="$STABLE_TIMEZONE"
+  log "  谷歌侧出口 ${tz_ip}；时区权威出口 ${TIMEZONE_IP:-待确认} 对应时区: ${gfwtz:-解析失败}"
 
   write_status "$consistent" "$cn" "$intl" "$gfw" "$goog" "${gfwtz:-?}" \
     "ok" 0 0 "三路探测完成" "$LAST_SUCCESS"
@@ -473,38 +586,45 @@ confirm_or_commit_probe() {
     return
   fi
 
-  if [[ -z "$gfwtz" ]]; then
-    log "无法解析出口 IP(${tz_ip})的时区，跳过设置"; return 1
-  fi
-  [[ "$consistent" != "1" ]] && log "注意: 三路 IP 不一致（已确认），仍按谷歌侧出口 ${tz_ip} 设时区"
-  apply_timezone "$gfwtz"
+  [[ "$consistent" != "1" ]] && log "注意: 三路 IP 不一致（已确认）；系统时区仍独立跟随谷歌侧权威出口 ${TIMEZONE_IP:-待确认}"
+  [[ "$gfwtz" == */* ]]
 }
 
 main_locked() {
-  log "开始三路出口 IP 一致性检测 (ip111 逻辑) ..."
-  local probe_started route_started
-  probe_started=$(date +%s)
+  log "开始三路出口 IP 一致性检测（HTTPS/TCP）..."
+  local google_payload="" google_rc=0 connect tls ttfb total code
 
-  route_started=$(date +%s)
-  cn=$(ip_china) || cn=""
-  CN_SECONDS=$(( $(date +%s) - route_started )); [[ -n "$cn" ]] && CN_OK=1 || CN_OK=0
+  if run_ip_route CN ip_china; then CN_OK=1; else CN_OK=0; fi
+  cn="$ROUTE_IP"
+  if run_ip_route INTL ip_intl; then INTL_OK=1; else INTL_OK=0; fi
+  intl="$ROUTE_IP"
+  if run_ip_route GFW ip_gfw; then GFW_OK=1; else GFW_OK=0; fi
+  gfw="$ROUTE_IP"
 
-  route_started=$(date +%s)
-  intl=$(ip_intl) || intl=""
-  INTL_SECONDS=$(( $(date +%s) - route_started )); [[ -n "$intl" ]] && INTL_OK=1 || INTL_OK=0
+  google_payload=$(google_reachable) || google_rc=$?
+  IFS='|' read -r connect tls ttfb total code <<<"$google_payload"
+  GOOGLE_CONNECT_SECONDS=$(normal_decimal "$connect")
+  GOOGLE_TLS_SECONDS=$(normal_decimal "$tls")
+  GOOGLE_TTFB_SECONDS=$(normal_decimal "$ttfb")
+  GOOGLE_SECONDS=$(normal_decimal "$total")
+  [[ "$code" =~ ^[0-9]{3}$ ]] || code=0
+  GOOGLE_HTTP_CODE="$code"
+  if [[ $google_rc -eq 0 ]]; then goog="可达"; GOOGLE_OK=1; else goog="不可达"; GOOGLE_OK=0; fi
 
-  route_started=$(date +%s)
-  gfw=$(ip_gfw) || gfw=""
-  GFW_SECONDS=$(( $(date +%s) - route_started )); [[ -n "$gfw" ]] && GFW_OK=1 || GFW_OK=0
+  PROBE_SECONDS=$(awk -v a="$CN_SECONDS" -v b="$INTL_SECONDS" -v c="$GFW_SECONDS" -v d="$GOOGLE_SECONDS" \
+    'BEGIN { printf "%.6f", a + b + c + d }')
 
-  route_started=$(date +%s)
-  if google_reachable; then goog="可达"; GOOGLE_OK=1; else goog="不可达"; GOOGLE_OK=0; fi
-  GOOGLE_SECONDS=$(( $(date +%s) - route_started ))
-  PROBE_SECONDS=$(( $(date +%s) - probe_started ))
+  log "  国内视角 : ${cn:-获取失败}（HTTPS total ${CN_SECONDS}s, TCP ${CN_CONNECT_SECONDS}s, TLS ${CN_TLS_SECONDS}s, TTFB ${CN_TTFB_SECONDS}s, HTTP ${CN_HTTP_CODE}）"
+  log "  国外视角 : ${intl:-获取失败}（HTTPS total ${INTL_SECONDS}s, TCP ${INTL_CONNECT_SECONDS}s, TLS ${INTL_TLS_SECONDS}s, TTFB ${INTL_TTFB_SECONDS}s, HTTP ${INTL_HTTP_CODE}）"
+  log "  被封/谷歌: ${gfw:-获取失败}（HTTPS total ${GFW_SECONDS}s, TCP ${GFW_CONNECT_SECONDS}s, TLS ${GFW_TLS_SECONDS}s, TTFB ${GFW_TTFB_SECONDS}s, HTTP ${GFW_HTTP_CODE}）"
+  log "  Google 204: ${goog}（HTTPS total ${GOOGLE_SECONDS}s, TCP ${GOOGLE_CONNECT_SECONDS}s, TLS ${GOOGLE_TLS_SECONDS}s, TTFB ${GOOGLE_TTFB_SECONDS}s, HTTP ${GOOGLE_HTTP_CODE}）"
 
-  log "  国内视角 : ${cn:-获取失败}（${CN_SECONDS}s）"
-  log "  国外视角 : ${intl:-获取失败}（${INTL_SECONDS}s）"
-  log "  被封/谷歌: ${gfw:-获取失败}（${GFW_SECONDS}s）  (Google: ${goog}, ${GOOGLE_SECONDS}s)"
+  # 时区校正只依赖真正访问 Claude/Google 的谷歌侧出口，不再被国内/国外辅助接口阻塞。
+  if is_ipv4 "$gfw"; then
+    sync_timezone_from_gfw "$gfw" || true
+  else
+    TIMEZONE_DETAIL="谷歌侧 HTTPS 出口获取失败，保留已确认时区并等待重试"
+  fi
 
   if [[ -z "$cn" || -z "$intl" || -z "$gfw" ]]; then
     handle_incomplete_probe
@@ -519,7 +639,6 @@ main_locked() {
     log "⚠️  三路 IP 不一致 —— 出口 IP 有问题（疑似分流/PAC/DNS泄漏）"
   fi
 
-  # 设时区以“谷歌/被封侧出口 IP”为准；三路都有效后才允许提交候选。
   confirm_or_commit_probe "$gfw" "$consistent"
 }
 
