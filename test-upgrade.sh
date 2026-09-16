@@ -46,7 +46,7 @@ printf '%s\n' '④ 登录启动但用户退出后不再被 KeepAlive 拉起'
 check "保留 RunAtLoad" "$(plutil -extract RunAtLoad raw "$ROOT/menubar/com.example.checkclaude.plist")" true
 if plutil -extract KeepAlive raw "$ROOT/menubar/com.example.checkclaude.plist" >/dev/null 2>&1; then keepalive=yes; else keepalive=no; fi
 check "移除 KeepAlive" "$keepalive" no
-check "构建版本为 4.4" "$(sed -n 's/.*CFBundleShortVersionString.*<string>\([^<]*\)<.*/\1/p' "$ROOT/menubar/build.sh")" 4.4
+check "构建版本为 4.5" "$(sed -n 's/.*CFBundleShortVersionString.*<string>\([^<]*\)<.*/\1/p' "$ROOT/menubar/build.sh")" 4.5
 
 printf '\n'
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "存在失败"; exit 1; }

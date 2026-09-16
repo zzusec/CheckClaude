@@ -25,6 +25,14 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.5（2026-09-16）
+
+- 系统时区改为独立跟随 Claude/Google 实际路径的“谷歌侧出口 IP”；国内或国外辅助探针波动时也不会阻塞时区修正。
+- 谷歌侧出口变化连续确认两次后，将出口 IP 与 IANA 时区成对提交；以后每轮检测都会纠正被定位服务或人工改回的系统时区。
+- 线路波动和质量检测统一使用 HTTPS over TCP，不再依赖 ICMP/ping，也不再用明文 HTTP 探针。
+- 最近 24 小时记录四路 HTTPS 总耗时、TCP 建连、TLS、TTFB、HTTP 状态和成功率；菜单新增平均耗时与抖动统计。
+- 菜单明确显示“时区权威出口 → 目标时区”和当前系统时区是否已经匹配。
+
 ### v4.4（2026-09-15）
 
 - 完整体检遇到单次公网探测超时时保留上次有效分数，连续两次失败才发布低分，避免 98 分瞬间跌到 60 多分。
@@ -95,7 +103,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 
 | 视角 | 含义 | 接口（多路兜底） |
 |---|---|---|
-| 国内 | 访问国内网站时对方看到的 IP | pconline / 百度 / bilibili / 3322 |
+| 国内 | 访问国内网站时对方看到的 IP | 3322 / pconline / bilibili / ipip（均为 HTTPS） |
 | 国外 | 访问未被封国外网站时的 IP | ipify / icanhazip / ipinfo |
 | 谷歌/被封 | 访问谷歌等被封网站时的 IP | Cloudflare trace / ip.sb + Google 可达性 |
 
@@ -103,8 +111,9 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 - 三者都成功但结果不一致 → 出口 IP 有问题（🔴，疑似分流 / PAC / DNS 泄漏），连续两次确认后告警。
 - 任一路临时超时 → 标记为网络检测波动，保留上次有效 IP；不会再产生 `IP → null → 原 IP` 的虚假变化。
 - 网络恢复或出现新 IP 时，连续两次得到相同结果才正式提交，避免公共查询接口偶发失败造成状态乱跳。
-- 每次检测分别记录国内、国外、谷歌侧和 Google 连通性的成功状态与耗时，自动保留最近 24 小时。
-- **时区始终以"谷歌/被封侧出口 IP"为准**（经 `ipinfo.io` 解析），自动写入系统时区。
+- 四路质量检测全部走 HTTPS/TCP，记录 TCP 建连、TLS、TTFB、总耗时和 HTTP 状态，自动保留最近 24 小时并计算抖动。
+- **时区始终以“谷歌/被封侧出口 IP”为权威**：出口变化独立连续确认两次，不受国内/国外辅助接口波动影响。
+- 每轮会重新核对系统 IANA 时区；若被 macOS 定位服务或人工改动，会自动纠正回权威出口对应时区。
 
 ## Claude 运行环境体检
 
@@ -203,18 +212,19 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 - 由一致变为不一致 → 通知「⚠️ 出口 IP 异常」；恢复一致 → 通知「出口已恢复正常」。
 - 单次查询失败只显示「网络检测波动」并沿用上次有效结果，不把获取失败当成 IP 变化。
 - 完整体检的单次网络失败只显示「复核中」并保留上次有效分数；连续两次失败才正式降分。
-- 同一出口 IP 的时区变化也需要连续两次确认，单个情报源的短暂误报不会修改系统时区。
+- 谷歌侧权威出口变化、同一出口 IP 的时区变化都需要连续两次确认，单次误报不会修改系统时区。
+- 已确认出口不变时，每轮都核对系统时区；发现漂移会立即自动纠正。
 - 检测进程带互斥锁，慢请求不会与下一轮并发覆盖状态。
 - 仅在状态**真正变化**时提醒，不会每 5 分钟刷屏。
 
 ## 菜单栏图标
 
-点击图标显示：三路 IP、Google 可达性、**谷歌侧时区**、当前系统时区、更新时间；
-并提供「网络波动图 / 立即检测 / 打开日志 / 退出」。网络波动图包含最近 60 次四路耗时趋势：
+点击图标显示：三路 IP、Google 可达性、**时区权威出口 → IANA 时区**、当前系统时区及匹配状态、更新时间；
+并提供「HTTPS/TCP 线路质量 / 立即检测 / 打开日志 / 退出」。质量子菜单包含最近 60 次四路趋势：
 
 - 国内、国外、谷歌侧、Google 各占一行，可直接定位是哪一路失败。
-- 折线表示该路耗时，橙点表示该路获取失败，红线表示已确认的出口 IP 变化。
-- 子菜单同时汇总最近 24 小时各路成功率、失败次数、平均耗时和 IP 变化次数。
+- 折线表示 HTTPS 总耗时，橙点表示该路失败，红线表示已确认的出口 IP 变化。
+- 子菜单汇总最近 24 小时各路成功率、失败次数、平均 HTTPS 耗时、抖动、TCP、TLS、TTFB 和 HTTP 状态。
 
 图标含义：🟢 一致　🟠 网络波动/复核中　🔴 异常　⚪️ 暂无数据。
 
@@ -258,11 +268,11 @@ bash ~/CheckClaude/uninstall.sh
 
 ## 工作原理
 
-1. 三路视角回显来源 IP，判断一致性（不一致即告警）。
-2. 取"谷歌/被封侧"出口 IP，用 `ipinfo.io` 解析成 IANA 时区（如 `Asia/Shanghai`）。
-3. 读 `/etc/localtime` 软链得当前时区（无需 sudo），相同则跳过。
-4. `/usr/share/zoneinfo/<tz>` 校验合法后，`systemsetup -settimezone` 写入。
-5. 与上次状态对比，IP 变化或一致性翻转则弹桌面通知。
+1. 四路探测全部使用 HTTPS/TCP，三路回显来源 IP 判断一致性，Google 204 验证实际连通性。
+2. “谷歌/被封侧”出口作为 Claude/Google 路径的时区权威；出口变化连续两次确认，和三路一致性状态独立。
+3. 通过多个 HTTPS 情报源解析 IANA 时区（如 `America/Los_Angeles`），并将出口 IP 与时区成对提交。
+4. 每轮读取 `/etc/localtime`；与权威时区不一致时，经 `/usr/share/zoneinfo` 校验后调用 `systemsetup -settimezone` 自动纠正。
+5. 最近 24 小时记录成功率、TCP、TLS、TTFB、HTTPS 总耗时和抖动；IP 或一致性确认变化时才通知。
 
 ---
 

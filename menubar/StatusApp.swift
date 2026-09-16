@@ -35,40 +35,6 @@ let upgradeScriptPath = script("upgrade")
 let updatePath = (baseDir as NSString).appendingPathComponent("update_status")
 let upgradeStatePath = (baseDir as NSString).appendingPathComponent("upgrade_state")
 
-struct NetworkHistoryPoint {
-    let timestamp: TimeInterval
-    let totalSeconds: Double
-    let result: String
-    let ip: String
-    let ipChanged: Bool
-    let cnSeconds: Double
-    let cnOK: Bool
-    let intlSeconds: Double
-    let intlOK: Bool
-    let gfwSeconds: Double
-    let gfwOK: Bool
-    let googleSeconds: Double
-    let googleOK: Bool
-
-    func seconds(for route: NetworkRoute) -> Double {
-        switch route {
-        case .cn: return cnSeconds
-        case .intl: return intlSeconds
-        case .gfw: return gfwSeconds
-        case .google: return googleSeconds
-        }
-    }
-
-    func succeeded(_ route: NetworkRoute) -> Bool {
-        switch route {
-        case .cn: return cnOK
-        case .intl: return intlOK
-        case .gfw: return gfwOK
-        case .google: return googleOK
-        }
-    }
-}
-
 enum NetworkRoute: CaseIterable {
     case cn, intl, gfw, google
 
@@ -89,6 +55,43 @@ enum NetworkRoute: CaseIterable {
         case .google: return .systemGreen
         }
     }
+}
+
+struct HTTPSRouteSample {
+    let totalSeconds: Double
+    let succeeded: Bool
+    let connectSeconds: Double
+    let tlsSeconds: Double
+    let ttfbSeconds: Double
+    let httpCode: Int
+
+    var hasDetailedTiming: Bool {
+        httpCode > 0 || connectSeconds > 0 || tlsSeconds > 0 || ttfbSeconds > 0
+    }
+}
+
+struct NetworkHistoryPoint {
+    let timestamp: TimeInterval
+    let totalSeconds: Double
+    let result: String
+    let ip: String
+    let ipChanged: Bool
+    let cn: HTTPSRouteSample
+    let intl: HTTPSRouteSample
+    let gfw: HTTPSRouteSample
+    let google: HTTPSRouteSample
+
+    func sample(for route: NetworkRoute) -> HTTPSRouteSample {
+        switch route {
+        case .cn: return cn
+        case .intl: return intl
+        case .gfw: return gfw
+        case .google: return google
+        }
+    }
+
+    func seconds(for route: NetworkRoute) -> Double { sample(for: route).totalSeconds }
+    func succeeded(_ route: NetworkRoute) -> Bool { sample(for: route).succeeded }
 }
 
 // NSMenu 没有原生图表控件，用一个只读 NSView 画四路小趋势图。
@@ -115,7 +118,7 @@ final class NetworkHistoryView: NSView {
             return "\(route.title)失败\(failures)次"
         }.joined(separator: "，")
         let changes = points.filter(\.ipChanged).count
-        return "最近\(points.count)次网络检测，\(routeText)，确认换IP\(changes)次"
+        return "最近\(points.count)次 HTTPS/TCP 检测，\(routeText)，确认换IP\(changes)次"
     }
 
     private func drawText(_ text: String, at point: NSPoint, font: NSFont, color: NSColor) {
@@ -127,7 +130,7 @@ final class NetworkHistoryView: NSView {
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
         let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .medium)
         let noteFont = NSFont.systemFont(ofSize: 9)
-        drawText("最近 \(points.count) 次分路趋势", at: NSPoint(x: 8, y: 5),
+        drawText("最近 \(points.count) 次 HTTPS/TCP 趋势", at: NSPoint(x: 8, y: 5),
                  font: titleFont, color: .labelColor)
 
         guard !points.isEmpty else {
@@ -171,10 +174,10 @@ final class NetworkHistoryView: NSView {
 
             drawText(route.title, at: NSPoint(x: 8, y: rowTop + 3), font: labelFont, color: route.color)
 
-            let successfulDurations = points.filter { $0.succeeded(route) }.map { max(0.5, $0.seconds(for: route)) }.sorted()
+            let successfulDurations = points.filter { $0.succeeded(route) }.map { max(0.01, $0.seconds(for: route)) }.sorted()
             let percentileIndex = max(0, Int(Double(max(0, successfulDurations.count - 1)) * 0.95))
-            let p95 = successfulDurations.isEmpty ? 1 : successfulDurations[percentileIndex]
-            let maxScale = max(1, p95 * 1.25)
+            let p95 = successfulDurations.isEmpty ? 0.1 : successfulDurations[percentileIndex]
+            let maxScale = max(0.1, p95 * 1.25)
             let amplitude = max(3, rowHeight - 8)
             let path = NSBezierPath()
             var previousSucceeded = false
@@ -182,7 +185,7 @@ final class NetworkHistoryView: NSView {
             for (index, point) in points.enumerated() {
                 let x = xPosition(index)
                 if point.succeeded(route) {
-                    let value = min(maxScale, max(0.5, point.seconds(for: route)))
+                    let value = min(maxScale, max(0.01, point.seconds(for: route)))
                     let y = rowBottom - CGFloat(value / maxScale) * amplitude
                     if previousSucceeded { path.line(to: NSPoint(x: x, y: y)) }
                     else { path.move(to: NSPoint(x: x, y: y)) }
@@ -204,7 +207,7 @@ final class NetworkHistoryView: NSView {
             path.stroke()
         }
 
-        drawText("折线=耗时   橙点=该路失败   红线=已确认换 IP",
+        drawText("折线=HTTPS 总耗时   橙点=失败   红线=已确认换 IP",
                  at: NSPoint(x: left, y: plotBottom + 3), font: noteFont, color: .secondaryLabelColor)
     }
 }
@@ -590,12 +593,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   let intlSeconds = Double(f[7]), let intlOK = Int(f[8]),
                   let gfwSeconds = Double(f[9]), let gfwOK = Int(f[10]),
                   let googleSeconds = Double(f[11]), let googleOK = Int(f[12]) else { return nil }
+
+            func number(_ index: Int) -> Double {
+                guard index < f.count else { return 0 }
+                return Double(f[index]) ?? 0
+            }
+            func code(_ index: Int) -> Int {
+                guard index < f.count else { return 0 }
+                return Int(f[index]) ?? 0
+            }
+            func sample(total: Double, ok: Int, metricsAt index: Int) -> HTTPSRouteSample {
+                HTTPSRouteSample(totalSeconds: total, succeeded: ok == 1,
+                                 connectSeconds: number(index), tlsSeconds: number(index + 1),
+                                 ttfbSeconds: number(index + 2), httpCode: code(index + 3))
+            }
+
             return NetworkHistoryPoint(timestamp: timestamp, totalSeconds: total, result: f[2], ip: f[3],
                                        ipChanged: f[4] == "1",
-                                       cnSeconds: cnSeconds, cnOK: cnOK == 1,
-                                       intlSeconds: intlSeconds, intlOK: intlOK == 1,
-                                       gfwSeconds: gfwSeconds, gfwOK: gfwOK == 1,
-                                       googleSeconds: googleSeconds, googleOK: googleOK == 1)
+                                       cn: sample(total: cnSeconds, ok: cnOK, metricsAt: 13),
+                                       intl: sample(total: intlSeconds, ok: intlOK, metricsAt: 17),
+                                       gfw: sample(total: gfwSeconds, ok: gfwOK, metricsAt: 21),
+                                       google: sample(total: googleSeconds, ok: googleOK, metricsAt: 25))
         }.sorted { $0.timestamp < $1.timestamp }
     }
 
@@ -605,6 +623,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let network = s["network"] ?? "ok"   // 旧版快照没有该字段，按稳定处理
         let history = readNetworkHistory()
         let tz = s["tz"] ?? "?"
+        let timezoneIP = s["timezone_ip"] ?? ""
+        let timezoneSynced = s["timezone_synced"] ?? "?"
+        let timezoneDetail = s["timezone_detail"] ?? ""
 
         // 矢量图标(SF Symbol) + 状态色 + 出口时区城市名，确保在菜单栏可见
         let gfwtz = s["gfwtz"] ?? ""
@@ -618,7 +639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let cps = readStatus(claudeProbeStatePath)
         let claudeScore = Int(cs["score"] ?? "") ?? -1
         let scoreVerifying = cps["state"] == "verifying"
-        let safe = claudeScore >= 90 && consistent == "1" && network == "ok"
+        let safe = claudeScore >= 90 && consistent == "1" && network == "ok" && timezoneSynced != "0"
         // 网络结果还在复核时不改变安全档位，也不发送“不可用/恢复”通知。
         if network == "ok" && !scoreVerifying {
             alertIfUnsafe(claudeScore, consistent: consistent, verdict: cs["verdict"] ?? "")
@@ -700,8 +721,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("国外视角: \(s["intl"] ?? "?")"))
         menu.addItem(disabled("谷歌/被封: \(s["gfw"] ?? "?")  (Google: \(s["google"] ?? "?"))"))
         menu.addItem(.separator())
-        menu.addItem(disabled("谷歌侧时区: \(s["gfwtz"] ?? "?")"))
-        menu.addItem(disabled("系统时区: \(tz)"))
+        let timezoneTarget = s["gfwtz"] ?? "?"
+        let authority = timezoneIP.isEmpty ? "待确认" : timezoneIP
+        menu.addItem(disabled("时区权威出口: \(authority) → \(timezoneTarget)"))
+        if timezoneSynced == "1" {
+            menu.addItem(colored("系统时区: \(tz)  已匹配 ✓", .systemGreen))
+        } else if timezoneSynced == "0" {
+            menu.addItem(colored("系统时区: \(tz)  未匹配，等待自动修正", .systemOrange))
+        } else {
+            menu.addItem(disabled("系统时区: \(tz)"))
+        }
+        if !timezoneDetail.isEmpty {
+            menu.addItem(disabled("时区状态: \(timezoneDetail)"))
+        }
         // 时间戳跟着系统时区走，而系统时区跟着出口走 —— 出口回到国内时它就是本地时间
         let exitCC = readStatus(claudeStatusPath)["country"] ?? ""
         menu.addItem(disabled("\(exitCC == "CN" ? "本地时间" : "海外时间"): \(s["time"] ?? "—")"))
@@ -789,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func networkHistoryMenuItem(_ history: [NetworkHistoryPoint]) -> NSMenuItem {
         let recent = Array(history.suffix(60))
-        let title = history.isEmpty ? "网络波动图（暂无数据）" : "网络波动图（最近 \(recent.count) 次）"
+        let title = history.isEmpty ? "HTTPS/TCP 线路质量（暂无数据）" : "HTTPS/TCP 线路质量（最近 \(recent.count) 次）"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
@@ -799,25 +831,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         submenu.addItem(.separator())
 
         if history.isEmpty {
-            submenu.addItem(disabled("24 小时内暂无检测记录"))
+            submenu.addItem(disabled("24 小时内暂无 HTTPS/TCP 检测记录"))
         } else {
             let changes = history.filter(\.ipChanged).count
             submenu.addItem(disabled("24 小时统计: \(history.count) 次检测 · 确认换 IP \(changes) 次"))
             for route in NetworkRoute.allCases {
                 submenu.addItem(disabled(routeSummary(route, history: history)))
+                submenu.addItem(disabled(routeTimingSummary(route, history: history)))
             }
         }
         item.submenu = submenu
         return item
     }
 
+    func formatNetworkDuration(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "—" }
+        if seconds < 1 { return "\(Int((seconds * 1000).rounded()))ms" }
+        return String(format: "%.2fs", seconds)
+    }
+
     func routeSummary(_ route: NetworkRoute, history: [NetworkHistoryPoint]) -> String {
         let successes = history.filter { $0.succeeded(route) }
         let failures = history.count - successes.count
         let rate = history.isEmpty ? 0 : Int((Double(successes.count) * 100 / Double(history.count)).rounded())
-        let average = successes.isEmpty ? 0 : successes.reduce(0) { $0 + $1.seconds(for: route) } / Double(successes.count)
-        let duration = successes.isEmpty ? "—" : (average < 1 ? "<1 秒" : String(format: "%.1f 秒", average))
-        return "\(route.title): \(rate)% 成功 · 失败 \(failures) · 平均 \(duration)"
+        let totals = successes.map { $0.seconds(for: route) }
+        let average = totals.isEmpty ? 0 : totals.reduce(0, +) / Double(totals.count)
+        let deltas = zip(totals.dropFirst(), totals).map { abs($0 - $1) }
+        let jitter = deltas.isEmpty ? 0 : deltas.reduce(0, +) / Double(deltas.count)
+        let averageText = totals.isEmpty ? "—" : formatNetworkDuration(average)
+        let jitterText = totals.count < 2 ? "—" : formatNetworkDuration(jitter)
+        return "\(route.title): \(rate)% 成功 · 失败 \(failures) · HTTPS \(averageText) · 抖动 \(jitterText)"
+    }
+
+    func routeTimingSummary(_ route: NetworkRoute, history: [NetworkHistoryPoint]) -> String {
+        let samples = history.map { $0.sample(for: route) }.filter { $0.succeeded && $0.hasDetailedTiming }
+        guard !samples.isEmpty else { return "    TCP/TLS/TTFB: 旧版记录未采集" }
+        func average(_ value: (HTTPSRouteSample) -> Double) -> Double {
+            samples.reduce(0) { $0 + value($1) } / Double(samples.count)
+        }
+        let latestCode = samples.last?.httpCode ?? 0
+        return "    TCP \(formatNetworkDuration(average { $0.connectSeconds })) · TLS \(formatNetworkDuration(average { $0.tlsSeconds })) · TTFB \(formatNetworkDuration(average { $0.ttfbSeconds })) · HTTP \(latestCode)"
     }
 
     func disabled(_ t: String) -> NSMenuItem {

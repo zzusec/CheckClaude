@@ -13,6 +13,7 @@ FAIL=0
 NOTIFY_LOG="$TEST_DIR/notifications"
 APPLY_LOG="$TEST_DIR/applied-timezones"
 MOCK_CN=""; MOCK_INTL=""; MOCK_GFW=""; MOCK_GOOGLE=1; MOCK_TZ="America/Los_Angeles"
+MOCK_CURRENT_TZ="America/Los_Angeles"
 
 check() { # check <描述> <实际> <期望>
   if [[ "$2" == "$3" ]]; then
@@ -26,13 +27,24 @@ check() { # check <描述> <实际> <期望>
 value() { awk -F= -v key="$2" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "$1" 2>/dev/null; }
 notification_count() { [[ -f "$NOTIFY_LOG" ]] && wc -l <"$NOTIFY_LOG" | tr -d ' ' || echo 0; }
 
-ip_china() { [[ -n "$MOCK_CN" ]] && printf '%s\n' "$MOCK_CN"; }
-ip_intl() { [[ -n "$MOCK_INTL" ]] && printf '%s\n' "$MOCK_INTL"; }
-ip_gfw() { [[ -n "$MOCK_GFW" ]] && printf '%s\n' "$MOCK_GFW"; }
-google_reachable() { [[ "$MOCK_GOOGLE" == "1" ]]; }
+ip_china() { [[ -n "$MOCK_CN" ]] && printf '%s|0.010|0.050|0.090|0.120|200\n' "$MOCK_CN"; }
+ip_intl() { [[ -n "$MOCK_INTL" ]] && printf '%s|0.020|0.060|0.100|0.140|200\n' "$MOCK_INTL"; }
+ip_gfw() { [[ -n "$MOCK_GFW" ]] && printf '%s|0.030|0.070|0.110|0.160|200\n' "$MOCK_GFW"; }
+google_reachable() {
+  if [[ "$MOCK_GOOGLE" == "1" ]]; then
+    printf '%s\n' '0.040|0.080|0.120|0.180|204'; return 0
+  fi
+  printf '%s\n' '0.000|0.000|0.000|0.900|000'; return 1
+}
 ip_timezone() { [[ -n "$MOCK_TZ" ]] && printf '%s\n' "$MOCK_TZ"; }
-current_timezone() { printf '%s\n' "America/Los_Angeles"; }
-apply_timezone() { printf '%s\n' "$1" >>"$APPLY_LOG"; return 0; }
+current_timezone() { printf '%s\n' "$MOCK_CURRENT_TZ"; }
+apply_timezone() {
+  [[ "$1" == "$MOCK_CURRENT_TZ" ]] && return 0
+  printf '%s\n' "$1" >>"$APPLY_LOG"
+  MOCK_CURRENT_TZ="$1"
+  return 0
+}
+
 notify() { printf '%s|%s\n' "$1" "$2" >>"$NOTIFY_LOG"; }
 
 run_sample() {
@@ -57,7 +69,9 @@ check "网络稳定" "$(value "$STATUS" network)" "ok"
 check "记录出口 IP" "$(value "$STATUS" gfw)" "$OLD_IP"
 check "建立通知基线" "$(cat "$STATE")" "$OLD_IP|1"
 check "没有首次变化通知" "$(notification_count)" "0"
-check "写入四路历史字段" "$(awk -F'|' 'NR==1 {print NF}' "$HISTORY")" "13"
+check "写入 HTTPS/TCP 历史字段" "$(awk -F'|' 'NR==1 {print NF}' "$HISTORY")" "29"
+check "记录国内 TCP/TLS/TTFB/HTTP" "$(awk -F'|' 'NR==1 {print $14"|"$15"|"$16"|"$17}' "$HISTORY")" "0.010|0.050|0.090|200"
+check "记录 Google HTTPS 指标" "$(awk -F'|' 'NR==1 {print $26"|"$27"|"$28"|"$29}' "$HISTORY")" "0.040|0.080|0.120|204"
 check "裁掉 24 小时以前记录" "$(grep -c "^${OLD_EPOCH}|" "$HISTORY" || true)" "0"
 
 printf '%s\n' '② 单次接口失败只标记复核，保留上次 IP'
@@ -149,6 +163,29 @@ confirm_timezone_candidate "$NEW_IP" "$NEW_IP" "America/New_York" || true
 check "第二次相同结果才接受" "$CONFIRMED_TIMEZONE" "America/New_York"
 check "更新稳定时区" "$STABLE_TIMEZONE" "America/New_York"
 check "时区候选计数清零" "$PENDING_TZ_COUNT" "0"
+
+
+printf '%s\n' '⑪ 辅助探针失败时，谷歌侧出口仍独立确认并修正时区'
+TZ_ONLY_IP="9.8.7.6"
+set_sample "" "" "$TZ_ONLY_IP"
+MOCK_TZ="America/New_York"
+MOCK_CURRENT_TZ="America/Los_Angeles"
+run_sample || true
+check "第一次权威出口变化只复核" "$(value "$STATUS" timezone_ip)" "$NEW_IP"
+check "记录权威出口确认 1/2" "$(value "$PROBE_STATE" pending_timezone_ip_count)" "1"
+check "第一次不修改系统时区" "$MOCK_CURRENT_TZ" "America/Los_Angeles"
+run_sample || true
+check "第二次独立确认权威出口" "$(value "$STATUS" timezone_ip)" "$TZ_ONLY_IP"
+check "辅助探针波动时仍更新出口时区" "$(value "$STATUS" gfwtz)" "America/New_York"
+check "系统时区已自动修正" "$MOCK_CURRENT_TZ" "America/New_York"
+check "快照标记时区一致" "$(value "$STATUS" timezone_synced)" "1"
+
+printf '%s\n' '⑫ 系统时区被外部改动后，下一轮自动纠偏'
+MOCK_CURRENT_TZ="Asia/Shanghai"
+run_sample || true
+check "相同权威出口自动纠偏" "$MOCK_CURRENT_TZ" "America/New_York"
+check "纠偏后快照仍一致" "$(value "$STATUS" timezone_synced)" "1"
+check "时区修正记录两次真实变更" "$(wc -l <"$APPLY_LOG" | tr -d ' ')" "2"
 
 if [[ $FAIL -eq 0 ]]; then
   echo
