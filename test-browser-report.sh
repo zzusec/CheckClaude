@@ -159,8 +159,10 @@ check "页面轮询完整报告" "$(grep -c '/report?t=' "$TMP_DIR/report.html" 
 check "完成后回收 localhost listener" "$(grep -c '/close?t=' "$TMP_DIR/report.html" || true)" 2
 check "动态值使用 textContent" "$([[ $(grep -c 'textContent' "$TMP_DIR/report.html" || true) -ge 2 ]] && echo yes)" yes
 check "包含 CSP" "$(grep -c 'Content-Security-Policy' "$ROOT/menubar/StatusApp.swift" || true)" 1
-check "不再十秒自动关闭" "$(grep -c '10 秒后自动关闭\|本页将在' "$TMP_DIR/report.html" || true)" 0
-check "明确页面不会自动关闭" "$(grep -c '页面不会自动关闭' "$TMP_DIR/report.html" || true)" 1
+check "完成后启动 4 秒倒计时" "$(grep -c 'let remaining=4' "$TMP_DIR/report.html" || true)" 1
+check "倒计时结束调用 window.close" "$(grep -c 'escapeClose();window.close()' "$TMP_DIR/report.html" || true)" 1
+check "提供保持打开按钮" "$(grep -c '保持打开' "$TMP_DIR/report.html" || true)" 1
+check "不再保留旧的 10 秒倒计时" "$(grep -c '10 秒后自动关闭\|本页将在 10 秒' "$TMP_DIR/report.html" || true)" 0
 check "时区匹配行使用原生选中态颜色" "$([[ $(grep -c 'plain("系统时区:' "$ROOT/menubar/StatusApp.swift" || true) -ge 2 ]] && echo yes)" yes
 check "时区匹配行不再硬编码绿色" "$(grep -c 'colored("系统时区:.*systemGreen' "$ROOT/menubar/StatusApp.swift" || true)" 0
 

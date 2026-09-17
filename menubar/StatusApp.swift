@@ -1820,7 +1820,18 @@ final class BrowserBridge {
           function renderReport(report){
             const c=report.claude||{}, n=report.network||{}, b=report.browser||o, q=report.quality||{};
             document.title="CheckClaude v"+txt(report.version,"?")+" 完整体检报告";
-            status.replaceChildren(element("span","pill good","检测完成"),element("span","","完整报告已生成，页面不会自动关闭。"));
+            const countdownText=element("span","","完整报告已生成，页面将在 4 秒后自动关闭。"), keepOpen=element("button","close","保持打开");
+            status.replaceChildren(element("span","pill good","检测完成"),countdownText,keepOpen);
+            let remaining=4, closeCancelled=false;
+            const closeTimer=setInterval(()=>{
+              if(closeCancelled){clearInterval(closeTimer);return;}
+              remaining-=1;
+              if(remaining<=0){
+                clearInterval(closeTimer);escapeClose();window.close();
+                setTimeout(()=>{countdownText.textContent="浏览器阻止了自动关闭，请手动关闭此标签页。";keepOpen.remove();},400);
+              }else countdownText.textContent="完整报告已生成，页面将在 "+remaining+" 秒后自动关闭。";
+            },1000);
+            keepOpen.onclick=()=>{closeCancelled=true;clearInterval(closeTimer);countdownText.textContent="已取消自动关闭，可继续查看报告。";keepOpen.remove();};
             content.replaceChildren();
             const score=Number(c.score||0), safe=score>=90&&c.grade==="优秀"&&c.consistent==="1";
             const summary=element("div","summary");
