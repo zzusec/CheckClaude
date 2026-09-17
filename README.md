@@ -25,6 +25,12 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.7（2026-09-17）
+
+- 完整检测报告加载完成后显示 4 秒倒计时并自动关闭浏览器标签页，减少体检完成后遗留页面。
+- 倒计时期间可点“保持打开”取消自动关闭，便于继续查看完整证据；若浏览器阻止脚本关闭，会明确提示手动关闭。
+- 自动关闭发生在报告数据已经完整渲染、localhost listener 已回收之后，不影响检测结果写入。
+
 ### v4.6（2026-09-17）
 
 - 浏览器检测页升级为完整本机报告：等待系统体检完成后展示出口 IP、三路出口、IP 情报、时区、WebRTC、DNS、Claude 连通性、HTTPS/TCP 质量以及全部 26 项评分证据。
@@ -238,7 +244,7 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 
 图标含义：🟢 一致　🟠 网络波动/复核中　🔴 异常　⚪️ 暂无数据。
 
-手动点「重新体检」会激活系统默认浏览器并打开一份完整的本机报告；出口变化触发的后台体检仍不抢焦点。浏览器信号回传后，页面继续等待系统、出口、DNS 和 Claude 连通性检测，最终展示 26 项评分、40+ 原始证据及一致性矩阵；页面不会自动关闭。报告只在当前 Mac 的 `127.0.0.1` 随机端口和一次性令牌之间传递，完整结果加载后 listener 会立即回收。
+手动点「重新体检」会激活系统默认浏览器并打开一份完整的本机报告；出口变化触发的后台体检仍不抢焦点。浏览器信号回传后，页面继续等待系统、出口、DNS 和 Claude 连通性检测，最终展示 26 项评分、40+ 原始证据及一致性矩阵。报告完成后倒计时 4 秒自动关闭，可点“保持打开”取消；报告只在当前 Mac 的 `127.0.0.1` 随机端口和一次性令牌之间传递，完整结果加载后 listener 会立即回收。
 
 「检查更新」执行期间菜单会显示进行中状态；完成后由 CheckClaude 自己显示“已是最新版”、发现新版或联网失败，
 不依赖系统通知权限。登录时仍会自动启动；主动点「退出」后保持退出，直到用户再次打开或下次登录。
