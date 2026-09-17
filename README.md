@@ -25,6 +25,16 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.6（2026-09-17）
+
+- 浏览器检测页升级为完整本机报告：等待系统体检完成后展示出口 IP、三路出口、IP 情报、时区、WebRTC、DNS、Claude 连通性、HTTPS/TCP 质量以及全部 26 项评分证据。
+- 新增 40+ 原始浏览器诊断维度，包括语言变体、字体分类、Emoji 风格、WebView/自动化环境、屏幕与硬件、隐私存储、Network Information、WebGL 和 Canvas；新增字段先用于诊断，不暗改原有 100 分模型。
+- 新增信号一致性矩阵，直接比较出口/系统/浏览器时区、WebRTC/IPv6/Cloudflare 出口、HTTP/JS UA 与语言、shell/浏览器连通路径。
+- 报告页不再 10 秒自动关闭；完整报告加载后立即回收 localhost listener，页面由用户手动关闭。
+- 报告数据仅通过绑定 `127.0.0.1`、带随机令牌和 CSP 的本机接口传输；动态值用 DOM `textContent` 渲染。
+- 修复菜单“系统时区已匹配”固定绿色文字在蓝色选中背景下对比度不足的问题，改用 AppKit 原生选中态文字颜色。
+- 支付/账号地区明确标注为人工核对项，不伪装成工具已经读取或检测付款资料。
+
 ### v4.5（2026-09-16）
 
 - 系统时区改为独立跟随 Claude/Google 实际路径的“谷歌侧出口 IP”；国内或国外辅助探针波动时也不会阻塞时区修正。
@@ -85,7 +95,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：26 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
-| `test-claude-check.sh` / `test-auto-timezone.sh` / `test-upgrade.sh` | macOS 体检评分、网络波动和更新流程自测（不联网） |
+| `test-claude-check.sh` / `test-auto-timezone.sh` / `test-browser-report.sh` / `test-upgrade.sh` | macOS 评分、网络波动、完整报告页和更新流程自测（不联网） |
 | `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级；发现新版主动显示右下角提示，点击后在线安装并自动重启 |
 | `windows/Program.cs` | Windows 版托盘、检测、修复和升级主逻辑 |
 | `windows/BrowserBridge.cs` | Windows 真实浏览器指纹本地桥接 |
@@ -204,7 +214,7 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 
 > 分数只反映环境画像冲突，不代表 Anthropic 官方判定，也不保证账号安全。
 
-自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`、`bash test-upgrade.sh`
+自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`、`bash test-browser-report.sh`、`bash test-upgrade.sh`
 
 ## 告警
 
@@ -227,6 +237,8 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 - 子菜单汇总最近 24 小时各路成功率、失败次数、平均 HTTPS 耗时、抖动、TCP、TLS、TTFB 和 HTTP 状态。
 
 图标含义：🟢 一致　🟠 网络波动/复核中　🔴 异常　⚪️ 暂无数据。
+
+手动点「重新体检」会激活系统默认浏览器并打开一份完整的本机报告；出口变化触发的后台体检仍不抢焦点。浏览器信号回传后，页面继续等待系统、出口、DNS 和 Claude 连通性检测，最终展示 26 项评分、40+ 原始证据及一致性矩阵；页面不会自动关闭。报告只在当前 Mac 的 `127.0.0.1` 随机端口和一次性令牌之间传递，完整结果加载后 listener 会立即回收。
 
 「检查更新」执行期间菜单会显示进行中状态；完成后由 CheckClaude 自己显示“已是最新版”、发现新版或联网失败，
 不依赖系统通知权限。登录时仍会自动启动；主动点「退出」后保持退出，直到用户再次打开或下次登录。

@@ -17,16 +17,16 @@ ip_country_code() { printf '%s\n' US; }
 
 # 一个"完美环境"的基线，各用例只覆盖自己关心的字段
 base_signals() {
-  COUNTRY=US; COUNTRY2=US; COUNTRY3=US; COUNTRY4=US; COUNTRY_NAME=美国; CITY=LA; ISP=Comcast; ASN=AS7922
+  COUNTRY=US; COUNTRY2=US; COUNTRY3=US; COUNTRY4=US; COUNTRY_NAME=美国; CITY=LA; ISP=Comcast; ASN=AS7922; LATITUDE=34.0522; LONGITUDE=-118.2437
   INTEL_SOURCES="ip-api:US,ipinfo:US,ipwho:US,ip.sb:US"; INTEL_COUNT=4
   HOSTING=0; PROXY=0
   API_CODE=401; WEB_CODE=200; API_REGION_BLOCK=0
-  CF_COLO=LAX; CF_LOC=US; CF_IP=1.2.3.4; PROBE_IP=1.2.3.4; CN_IP=1.2.3.4; INTL_IP=1.2.3.4
+  CF_COLO=LAX; CF_LOC=US; CF_IP=1.2.3.4; CF_WARP=off; PROBE_IP=1.2.3.4; CN_IP=1.2.3.4; INTL_IP=1.2.3.4
   CONSISTENT=1; SYS_TZ=America/Los_Angeles; GFW_TZ=America/Los_Angeles
   TZ_SELF_CONSISTENT=1; TZ_OFFSET=-0700; TZ_ABBR=PDT
   SYS_LOCALE=en_US; SYS_LANG=en; LOCALE_CC=US
   PROXY_MODE="TUN 全局"; PAC_ON=0
-  DNS_VERDICT="正常(Cloudflare)"; DNS_RESULT=104.18.1.1; DNS_SCOPE="本地/代理接管"
+  DNS_VERDICT="正常(Cloudflare)"; DNS_RESULT=104.18.1.1; DNS_SCOPE="本地/代理接管"; DNS_SERVERS="1.1.1.1 8.8.8.8 "
   CLAUDE_BASE=""; CLAUDE_VER=test
   IP_CHANGES=0; VM_HOST=物理机
   BR_OK=1; BR_TZ=America/Los_Angeles; BR_LANGS=en-US,en; BR_LOCALE=en-US
@@ -177,7 +177,7 @@ cat >"$TMP/ipinfo" <<'JSON'
 {"country":"US","org":"Org B"}
 JSON
 cat >"$TMP/ipwho" <<'JSON'
-{"success":true,"country_code":"Us","connection":{"org":"Org C"}}
+{"success":true,"country_code":"Us","latitude":34.0522,"longitude":-118.2437,"connection":{"org":"Org C"}}
 JSON
 cat >"$TMP/ipsb" <<'JSON'
 {"country_code":"uS","organization":"Org D"}
@@ -187,6 +187,7 @@ parse_net
 check "解析四家来源" "$INTEL_SOURCES" "ip-api:US,ipinfo:US,ipwho:US,ip.sb:US"
 check "有效来源数" "$INTEL_COUNT" 4
 check "主国家码规范化" "$COUNTRY" US
+check "解析经纬度" "$LATITUDE,$LONGITUDE" "34.0522,-118.2437"
 
 echo "㉓ 出口稳定性只统计已确认变化，不统计失败/恢复"
 now=$(date +%s); old=$((now - 90000))
@@ -224,6 +225,15 @@ confirmed_score=$SCORE
 publish_cstatus || true
 check "不被旧高分掩盖" "$(status_value "$CSTATUS" score)" "$confirmed_score"
 check "已确认风险不进入复核" "$(status_value "$CPROBE_STATE" state)" ok
+
+echo "㉖ 完整报告状态包含 DNS、Cloudflare、IPv6 和三端连通证据"
+base_signals; IPV6="2001:db8::1"; IPV6_CC=US; compute_score; build_gains; write_cstatus
+check "写入 DNS 服务器" "$(status_value "$CSTATUS" dnsservers)" "1.1.1.1 8.8.8.8 "
+check "写入 DNS 应答" "$(status_value "$CSTATUS" dnsanswer)" "104.18.1.1"
+check "写入 Cloudflare 来源" "$(status_value "$CSTATUS" cfip)/$(status_value "$CSTATUS" cfloc)/$(status_value "$CSTATUS" cfwarp)" "1.2.3.4/US/off"
+check "写入出口坐标" "$(status_value "$CSTATUS" latitude),$(status_value "$CSTATUS" longitude)" "34.0522,-118.2437"
+check "写入 IPv6 证据" "$(status_value "$CSTATUS" ipv6)/$(status_value "$CSTATUS" ipv6country)" "2001:db8::1/US"
+check "写入网站连通状态" "$(status_value "$CSTATUS" api)/$(status_value "$CSTATUS" web)/$(status_value "$CSTATUS" site)" "401/200/200"
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }

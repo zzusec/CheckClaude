@@ -580,6 +580,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return d
     }
 
+    func browserReportPayload() -> [String: Any] {
+        let history = readNetworkHistory()
+        let quality: [String: Any]
+        if let latest = history.last {
+            func route(_ value: NetworkRoute) -> [String: Any] {
+                let sample = latest.sample(for: value)
+                let successes = history.filter { $0.succeeded(value) }
+                let totals = successes.map { $0.seconds(for: value) }
+                let average = totals.isEmpty ? 0 : totals.reduce(0, +) / Double(totals.count)
+                let deltas = zip(totals.dropFirst(), totals).map { abs($0 - $1) }
+                let jitter = deltas.isEmpty ? 0 : deltas.reduce(0, +) / Double(deltas.count)
+                return [
+                    "ok": sample.succeeded,
+                    "http": sample.httpCode,
+                    "total": sample.totalSeconds,
+                    "connect": sample.connectSeconds,
+                    "tls": sample.tlsSeconds,
+                    "ttfb": sample.ttfbSeconds,
+                    "successRate": history.isEmpty ? 0 : Int((Double(successes.count) * 100 / Double(history.count)).rounded()),
+                    "failures": history.count - successes.count,
+                    "average": average,
+                    "jitter": jitter,
+                ]
+            }
+            quality = [
+                "samples": history.count,
+                "ipChanges": history.filter(\.ipChanged).count,
+                "cn": route(.cn), "intl": route(.intl), "gfw": route(.gfw), "google": route(.google),
+            ]
+        } else {
+            quality = ["samples": 0, "ipChanges": 0]
+        }
+        return [
+            "ready": true,
+            "generatedAt": ISO8601DateFormatter().string(from: Date()),
+            "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?",
+            "network": readStatus(statusPath),
+            "claude": readStatus(claudeStatusPath),
+            "browser": readStatus(browserPath),
+            "probe": readStatus(claudeProbeStatePath),
+            "quality": quality,
+        ]
+    }
+
     func readNetworkHistory() -> [NetworkHistoryPoint] {
         guard let txt = try? String(contentsOfFile: networkHistoryPath, encoding: .utf8) else { return [] }
         let now = Date().timeIntervalSince1970
@@ -725,9 +769,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let authority = timezoneIP.isEmpty ? "待确认" : timezoneIP
         menu.addItem(disabled("时区权威出口: \(authority) → \(timezoneTarget)"))
         if timezoneSynced == "1" {
-            menu.addItem(colored("系统时区: \(tz)  已匹配 ✓", .systemGreen))
+            menu.addItem(plain("系统时区: \(tz)  已匹配 ✓"))
         } else if timezoneSynced == "0" {
-            menu.addItem(colored("系统时区: \(tz)  未匹配，等待自动修正", .systemOrange))
+            menu.addItem(plain("系统时区: \(tz)  未匹配，等待自动修正 ⚠"))
         } else {
             menu.addItem(disabled("系统时区: \(tz)"))
         }
@@ -878,6 +922,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         i.isEnabled = false
         return i
     }
+
+    // 使用系统原生菜单文字颜色。被蓝色选中时 AppKit 会自动切换成白色，
+    // 避免固定绿/橙色 attributedTitle 在选中态下对比度不足。
+    func plain(_ t: String) -> NSMenuItem {
+        let i = NSMenuItem(title: t, action: #selector(noop), keyEquivalent: "")
+        i.target = self
+        return i
+    }
     // disabled 项的 attributedTitle 会被系统统一压成灰色，所以要上色就必须是 enabled 的，
     // 没有实际动作的就绑一个空 selector。
     func colored(_ t: String, _ color: NSColor, _ sel: Selector? = nil) -> NSMenuItem {
@@ -935,8 +987,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 先采浏览器指纹，再只运行一次完整评分。检测期间保留上次有效分数，
     // 不再把缺少浏览器信号的中间分数写进菜单并触发假告警。
-    func fullCheck(_ args: [String] = ["--quiet"]) {
-        guard phase == nil else { return }           // 正在检测就别叠加
+    func fullCheck(_ args: [String] = ["--quiet"], activateBrowser: Bool = false) {
+        guard phase == nil, bridge == nil else { return } // 正在检测或报告页还在汇总时别叠加
         guard browserProbeEnabled else {
             phase = "系统检测"
             refresh()
@@ -945,20 +997,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         phase = "浏览器指纹"
         refresh()
-        bridge = BrowserBridge(outPath: browserPath) { [weak self] ok in
+        bridge = BrowserBridge(outPath: browserPath, activateBrowser: activateBrowser, collected: { [weak self] ok in
             guard let self else { return }
-            self.bridge = nil
             if ok {
                 self.phase = "系统检测"
                 self.refresh()
                 self.runScript(args, claudeScriptPath) { [weak self] _ in
-                    self?.phase = nil
-                    self?.refresh()
+                    guard let self else { return }
+                    self.phase = nil
+                    self.refresh()
+                    self.bridge?.publishReport(self.browserReportPayload())
                 }
             } else {
+                self.bridge = nil
                 self.fallbackWebView(args)
             }
-        }
+        }, cleanedUp: { [weak self] in
+            self?.bridge = nil
+        })
         bridge?.start()
     }
 
@@ -1119,7 +1175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
-    @objc func runClaudeCheck() { fullCheck() }
+    @objc func runClaudeCheck() { fullCheck(activateBrowser: true) }
 
     @objc func toggleBrowserProbe() {
         UserDefaults.standard.set(!browserProbeEnabled, forKey: "browserProbe")
@@ -1493,260 +1549,367 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
 // 安全: 只绑 127.0.0.1、随机端口、URL 带一次性 token、拿到结果或 90 秒超时立即关闭监听。
 final class BrowserBridge {
     private var listener: NWListener?
-    private var timeout: Timer?
+    private var collectionTimeout: Timer?
+    private var cleanupTimer: Timer?
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)
     private let outPath: String
-    private let done: (Bool) -> Void
-    private var finished = false
+    private let activateBrowser: Bool
+    private let collected: (Bool) -> Void
+    private let cleanedUp: () -> Void
+    private let ready: ((URL) -> Void)?
+    private var collectionDelivered = false
+    private var cleaned = false
+    private var reportData: Data?
 
-    init(outPath: String, done: @escaping (Bool) -> Void) { self.outPath = outPath; self.done = done }
+    init(outPath: String, activateBrowser: Bool = false,
+         collected: @escaping (Bool) -> Void,
+         cleanedUp: @escaping () -> Void, ready: ((URL) -> Void)? = nil) {
+        self.outPath = outPath
+        self.activateBrowser = activateBrowser
+        self.collected = collected
+        self.cleanedUp = cleanedUp
+        self.ready = ready
+    }
 
     func start() {
         do {
             let l = try NWListener(using: .tcp, on: .any)
-            l.newConnectionHandler = { [weak self] c in self?.handle(c) }
-            l.stateUpdateHandler = { [weak self] st in
-                guard case .ready = st, let self, let port = self.listener?.port else { return }
+            l.newConnectionHandler = { [weak self] connection in self?.handle(connection) }
+            l.stateUpdateHandler = { [weak self] state in
+                guard case .ready = state, let self, let port = self.listener?.port else { return }
                 let url = "http://127.0.0.1:\(port.rawValue)/c?t=\(self.token)"
-                // activates=false: 浏览器在后台开标签页，不抢焦点、不打断当前工作。
-                // 采集完页面会自己 window.close()，用户基本无感。
-                let cfg = NSWorkspace.OpenConfiguration()
-                cfg.activates = false
-                cfg.addsToRecentItems = false
-                NSWorkspace.shared.open(URL(string: url)!, configuration: cfg, completionHandler: nil)
+                guard let reportURL = URL(string: url) else { return }
+                if let ready = self.ready {
+                    ready(reportURL)
+                } else {
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = self.activateBrowser
+                    config.addsToRecentItems = false
+                    NSWorkspace.shared.open(reportURL, configuration: config, completionHandler: nil)
+                }
             }
             listener = l
             l.start(queue: .main)
-            timeout = Timer.scheduledTimer(withTimeInterval: 90, repeats: false) { [weak self] _ in self?.finish(false) }
-        } catch { done(false) }
+            collectionTimeout = Timer.scheduledTimer(withTimeInterval: 90, repeats: false) { [weak self] _ in
+                self?.deliverCollection(false)
+                self?.cleanup()
+            }
+        } catch {
+            deliverCollection(false)
+            cleanup()
+        }
     }
 
-    private func handle(_ c: NWConnection) {
-        c.start(queue: .main)
-        c.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, _, _ in
-            guard let self, let data, let req = String(data: data, encoding: .utf8) else { c.cancel(); return }
-            let head = req.components(separatedBy: "\r\n\r\n").first ?? req
-            let lines = head.components(separatedBy: "\r\n")
-            let start = lines.first ?? ""
-            guard start.contains(self.token) else { self.respond(c, 403, "text/plain", "forbidden"); return }
+    func publishReport(_ payload: [String: Any]) {
+        guard !cleaned, JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        reportData = data
+    }
 
-            if start.hasPrefix("POST") {
-                let body = req.components(separatedBy: "\r\n\r\n").dropFirst().joined(separator: "\r\n\r\n")
-                self.save(headers: lines, body: body)
-                self.respond(c, 200, "text/plain", "ok")
-                self.finish(true)
+    private func handle(_ connection: NWConnection) {
+        connection.start(queue: .main)
+        receiveRequest(connection, buffer: Data())
+    }
+
+    private func receiveRequest(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self else { connection.cancel(); return }
+            var accumulated = buffer
+            if let data { accumulated.append(data) }
+            if self.requestIsComplete(accumulated) {
+                self.processRequest(connection, data: accumulated)
+            } else if error == nil, !isComplete, accumulated.count < 262144 {
+                self.receiveRequest(connection, buffer: accumulated)
             } else {
-                self.respond(c, 200, "text/html; charset=utf-8", Self.page(token: String(self.token)))
+                connection.cancel()
             }
         }
     }
 
-    private func respond(_ c: NWConnection, _ code: Int, _ type: String, _ body: String) {
-        let b = Array(body.utf8)
-        let resp = "HTTP/1.1 \(code) OK\r\nContent-Type: \(type)\r\nContent-Length: \(b.count)\r\nConnection: close\r\n\r\n"
-        c.send(content: Data(resp.utf8) + Data(b), completion: .contentProcessed { _ in c.cancel() })
+    private func requestIsComplete(_ data: Data) -> Bool {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let range = data.range(of: separator),
+              let header = String(data: data[..<range.lowerBound], encoding: .utf8) else { return false }
+        let contentLength = header.components(separatedBy: "\r\n").compactMap { line -> Int? in
+            let parts = line.split(separator: ":", maxSplits: 1).map(String.init)
+            guard parts.count == 2, parts[0].lowercased() == "content-length" else { return nil }
+            return Int(parts[1].trimmingCharacters(in: .whitespaces))
+        }.first ?? 0
+        return data.count >= range.upperBound + contentLength
     }
 
-    // 服务端能看到的请求头正是浏览器指纹的一部分，JS 拿不到自己发出去的这些头
+    private func processRequest(_ connection: NWConnection, data: Data) {
+        let separator = Data("\r\n\r\n".utf8)
+        guard let range = data.range(of: separator),
+              let header = String(data: data[..<range.lowerBound], encoding: .utf8) else {
+            respond(connection, 400, "text/plain; charset=utf-8", Data("bad request".utf8)); return
+        }
+        let lines = header.components(separatedBy: "\r\n")
+        let requestLine = lines.first ?? ""
+        let parts = requestLine.split(separator: " ").map(String.init)
+        guard parts.count >= 2 else {
+            respond(connection, 400, "text/plain; charset=utf-8", Data("bad request".utf8)); return
+        }
+        let method = parts[0], target = parts[1]
+        let suppliedToken = URLComponents(string: target)?.queryItems?.first(where: { $0.name == "t" })?.value
+        guard suppliedToken == String(token) else {
+            respond(connection, 403, "text/plain; charset=utf-8", Data("forbidden".utf8)); return
+        }
+
+        if method == "POST", target.hasPrefix("/r?") {
+            let bodyData = data.subdata(in: range.upperBound..<data.count)
+            let body = String(data: bodyData, encoding: .utf8) ?? ""
+            save(headers: lines, body: body)
+            respond(connection, 200, "text/plain; charset=utf-8", Data("ok".utf8))
+            deliverCollection(true)
+            scheduleCleanup()
+        } else if method == "GET", target.hasPrefix("/report?") {
+            if let reportData {
+                respond(connection, 200, "application/json; charset=utf-8", reportData)
+            } else {
+                respond(connection, 202, "application/json; charset=utf-8", Data("{\"ready\":false}".utf8))
+            }
+        } else if method == "POST", target.hasPrefix("/close?") {
+            respond(connection, 200, "text/plain; charset=utf-8", Data("closed".utf8)) { [weak self] in
+                self?.cleanup()
+            }
+        } else if method == "GET" {
+            respond(connection, 200, "text/html; charset=utf-8", Data(Self.page(token: String(token)).utf8))
+        } else {
+            respond(connection, 404, "text/plain; charset=utf-8", Data("not found".utf8))
+        }
+    }
+
+    private func respond(_ connection: NWConnection, _ code: Int, _ type: String, _ body: Data,
+                         completion: (() -> Void)? = nil) {
+        let reason: String
+        switch code {
+        case 200: reason = "OK"
+        case 202: reason = "Accepted"
+        case 400: reason = "Bad Request"
+        case 403: reason = "Forbidden"
+        default: reason = "Not Found"
+        }
+        var headers = "HTTP/1.1 \(code) \(reason)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
+        headers += "Cache-Control: no-store, max-age=0\r\nPragma: no-cache\r\nReferrer-Policy: no-referrer\r\n"
+        headers += "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n"
+        if type.hasPrefix("text/html") {
+            headers += "Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' https://claude.ai https://www.anthropic.com https://api.anthropic.com; img-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'\r\n"
+        }
+        headers += "Connection: close\r\n\r\n"
+        connection.send(content: Data(headers.utf8) + body, completion: .contentProcessed { _ in
+            connection.cancel()
+            if let completion { DispatchQueue.main.async(execute: completion) }
+        })
+    }
+
     private func save(headers: [String], body: String) {
-        var out: [String: String] = ["source": "browser"]
-        let want = ["user-agent": "ua", "accept-language": "accept_lang",
-                    "sec-ch-ua": "ch_ua", "sec-ch-ua-platform": "ch_platform",
-                    "sec-ch-ua-mobile": "ch_mobile", "sec-fetch-site": "sf_site",
-                    "sec-fetch-mode": "sf_mode", "sec-fetch-dest": "sf_dest"]
-        for h in headers.dropFirst() {
-            guard let i = h.firstIndex(of: ":") else { continue }
-            let k = h[..<i].lowercased(), v = h[h.index(after: i)...].trimmingCharacters(in: .whitespaces)
-            if let key = want[String(k)] { out[key] = v.replacingOccurrences(of: "\"", with: "") }
+        var output: [String: String] = ["source": "browser"]
+        let wanted = ["user-agent": "ua", "accept-language": "accept_lang",
+                      "sec-ch-ua": "ch_ua", "sec-ch-ua-platform": "ch_platform",
+                      "sec-ch-ua-mobile": "ch_mobile", "sec-fetch-site": "sf_site",
+                      "sec-fetch-mode": "sf_mode", "sec-fetch-dest": "sf_dest"]
+        for header in headers.dropFirst() {
+            guard let index = header.firstIndex(of: ":") else { continue }
+            let key = header[..<index].lowercased()
+            let value = header[header.index(after: index)...].trimmingCharacters(in: .whitespaces)
+            if let mapped = wanted[String(key)] {
+                output[mapped] = value.replacingOccurrences(of: "\"", with: "")
+            }
         }
-        for kv in body.components(separatedBy: "\n") {
-            guard let i = kv.firstIndex(of: "=") else { continue }
-            out[String(kv[..<i])] = String(kv[kv.index(after: i)...])
+        for pair in body.components(separatedBy: "\n") {
+            guard let index = pair.firstIndex(of: "=") else { continue }
+            output[String(pair[..<index])] = String(pair[pair.index(after: index)...])
         }
-        var txt = "time=\(Int(Date().timeIntervalSince1970))\n"
-        for (k, v) in out.sorted(by: { $0.key < $1.key }) {
-            txt += "\(k)=\(v.replacingOccurrences(of: "\n", with: " "))\n"
+        var text = "time=\(Int(Date().timeIntervalSince1970))\n"
+        for (key, value) in output.sorted(by: { $0.key < $1.key }) {
+            text += "\(key)=\(value.replacingOccurrences(of: "\n", with: " "))\n"
         }
-        try? txt.write(toFile: outPath, atomically: true, encoding: .utf8)
+        try? text.write(toFile: outPath, atomically: true, encoding: .utf8)
     }
 
-    private func finish(_ ok: Bool) {
-        guard !finished else { return }
-        finished = true
-        timeout?.invalidate(); listener?.cancel(); listener = nil
-        done(ok)
+    private func deliverCollection(_ ok: Bool) {
+        guard !collectionDelivered else { return }
+        collectionDelivered = true
+        collectionTimeout?.invalidate(); collectionTimeout = nil
+        collected(ok)
+    }
+
+    private func scheduleCleanup() {
+        cleanupTimer?.invalidate()
+        cleanupTimer = Timer.scheduledTimer(withTimeInterval: 10 * 60, repeats: false) { [weak self] _ in
+            self?.cleanup()
+        }
+    }
+
+    private func cleanup() {
+        guard !cleaned else { return }
+        cleaned = true
+        collectionTimeout?.invalidate(); cleanupTimer?.invalidate()
+        listener?.cancel(); listener = nil
+        cleanedUp()
     }
 
     static func page(token: String) -> String {
         return """
-        <!doctype html><meta charset="utf-8"><title>CheckClaude 浏览器指纹检测</title>
-        <style>body{font:15px/1.8 -apple-system,system-ui,sans-serif;max-width:32rem;margin:16vh auto;padding:0 1.5rem;color:#1a1a2e}
-        h1{font-size:1.3rem;margin:0 0 .6rem}p{color:#5c5c70;margin:.4rem 0}
-        .ok{color:#2f855a;font-weight:500}.err{color:#c53030}
-        table{border-collapse:collapse;width:100%;margin:1rem 0 1.4rem;font-size:.92rem}
-        th{text-align:left;font-weight:400;color:#8a8a9a;padding:.45rem .9rem .45rem 0;white-space:nowrap;vertical-align:top;width:7.5rem}
-        td{padding:.45rem 0;color:#1a1a2e;word-break:break-all}
-        tr+tr th,tr+tr td{border-top:1px solid #ececf3}
-        .mute{font-size:.86rem;color:#8a8a9a}
-        #keep{font:inherit;font-size:.86rem;margin-left:.5rem;padding:.2rem .7rem;cursor:pointer;
-              border:1px solid #ddd8ff;border-radius:6px;background:#f0eeff;color:#4e4aaf}</style>
-        <h1>CheckClaude 浏览器指纹检测</h1>
-        <p id="s">正在采集…</p>
-        <div id="d"></div>
-        <div id="f" style="display:none">
-          <p>这些信号已回传到本机的 CheckClaude，用于评估 claude.ai 网页端登录时的环境画像。
-             <b>完整体检结果请看菜单栏的 CheckClaude 图标。</b></p>
-          <p class="mute">检测在本机完成，数据不经过任何服务器，也不会被保存到本机以外的地方。</p>
-          <p class="mute"><span id="cd"></span> <button id="keep">保持打开</button></p>
-        </div>
-        <script>
-        (async () => {
+        <!doctype html>
+        <html lang="zh-CN"><head><meta charset="utf-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>CheckClaude 完整环境体检</title>
+        <style>
+        :root{color-scheme:light dark;--bg:#f5f6f8;--surface:#fff;--surface2:#f8f9fb;--text:#172033;--muted:#667085;--line:#dfe3ea;--good:#08783e;--goodbg:#eaf8f0;--warn:#9a5700;--warnbg:#fff4dc;--bad:#b42318;--badbg:#fff0ee;--info:#175cd3;--infobg:#eef4ff;--accent:#315efb}
+        @media(prefers-color-scheme:dark){:root{--bg:#0c111b;--surface:#151c28;--surface2:#1b2432;--text:#f4f6fb;--muted:#aab4c4;--line:#2d394b;--good:#72d69b;--goodbg:#123526;--warn:#f6c76d;--warnbg:#3c2c10;--bad:#ff9b91;--badbg:#451d1d;--info:#9cc2ff;--infobg:#172e55;--accent:#7ca4ff}}
+        *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button{font:inherit}
+        main{width:min(1120px,calc(100% - 32px));margin:36px auto 80px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:22px}.brand{font-size:13px;font-weight:750;letter-spacing:.08em;color:var(--accent)}h1{margin:5px 0 6px;font-size:clamp(27px,4vw,42px);line-height:1.15;letter-spacing:-.03em}.lead{margin:0;color:var(--muted)}
+        .close{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:10px;padding:9px 14px;cursor:pointer}.close:hover{border-color:var(--accent)}
+        .status{display:flex;align-items:center;gap:10px;margin:18px 0;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.spinner{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+        .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metric{padding:17px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.metric b{display:block;font-size:25px;line-height:1.2}.metric span{display:block;margin-top:5px;color:var(--muted);font-size:12px}
+        .verdict{margin:0 0 18px;padding:17px 19px;border-radius:14px;background:var(--surface);border:1px solid var(--line);font-weight:650}
+        section{margin-top:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface);overflow:hidden}section h2{margin:0;padding:15px 18px 12px;font-size:17px}section .desc{margin:-8px 18px 12px;color:var(--muted);font-size:13px}.rows{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:minmax(150px,230px) 1fr;gap:18px;padding:11px 18px;border-top:1px solid var(--line)}.row:first-child{border-top:0}.key{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+        .pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:750}.good{color:var(--good);background:var(--goodbg)}.warn{color:var(--warn);background:var(--warnbg)}.bad{color:var(--bad);background:var(--badbg)}.neutral{color:var(--info);background:var(--infobg)}
+        .matrix{display:grid;grid-template-columns:1.15fr auto 2fr;gap:0;border-top:1px solid var(--line)}.matrix>div{padding:11px 16px;border-top:1px solid var(--line)}.matrix>div:nth-child(-n+3){border-top:0}.matrix .detail{color:var(--muted)}
+        .signal-table{width:100%;border-collapse:collapse}.signal-table th,.signal-table td{text-align:left;padding:10px 13px;border-top:1px solid var(--line);vertical-align:top}.signal-table th{color:var(--muted);font-size:12px}.signal-table td:last-child,.signal-table th:last-child{text-align:right;white-space:nowrap}.signal-table .miss{color:var(--bad);font-weight:700}.signal-table .full{color:var(--good)}
+        ul{margin:0;padding:0 0 0 20px}li+li{margin-top:7px}.note{color:var(--muted);font-size:13px}.footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}
+        @media(max-width:760px){main{width:min(100% - 20px,1120px);margin-top:20px}.top{display:block}.close{margin-top:14px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.row{grid-template-columns:1fr;gap:3px}.matrix{grid-template-columns:1fr}.matrix>div{border-top:0}.matrix>div:nth-child(3n){padding-top:3px;padding-bottom:14px;border-bottom:1px solid var(--line)}.signal-table{font-size:13px}.signal-table th:nth-child(1),.signal-table td:nth-child(1){display:none}}
+        @media(prefers-reduced-motion:reduce){.spinner{animation:none}}
+        </style></head><body><main>
+        <div class="top"><div><div class="brand">CHECKCLAUDE · 本机隐私检测</div><h1>Claude 完整环境体检</h1><p class="lead">浏览器、系统、出口、DNS 与网络路径的一致性报告</p></div><button id="close" class="close" type="button">关闭页面</button></div>
+        <div id="status" class="status"><span class="spinner"></span><span>正在采集浏览器信号…</span></div>
+        <div id="content"></div><p class="footer">检测数据只在本机 CheckClaude 与当前浏览器标签页之间传递，不上传检测报告。</p>
+        </main><script>
+        (() => {
+          const TOKEN = "\(token)";
+          const status = document.getElementById("status"), content = document.getElementById("content");
           const o = {};
-          const set = (k, v) => { o[k] = String(v == null ? "" : v).replace(/\\n/g, " "); };
-          try {
-            set("ua_js", navigator.userAgent || "");
-            set("languages", (navigator.languages || []).join(","));
-            const ro = Intl.DateTimeFormat().resolvedOptions();
-            set("tz", ro.timeZone); set("locale", ro.locale);
-            set("tzoffset", -new Date().getTimezoneOffset() / 60);
-            set("platform", navigator.platform); set("hw", navigator.hardwareConcurrency);
-            // 高熵 Client Hints: 只有 Chromium 有，能拿到真实平台版本和品牌列表
-            if (navigator.userAgentData) {
-              set("uad_mobile", navigator.userAgentData.mobile);
-              set("uad_platform", navigator.userAgentData.platform);
-              try {
-                const h = await navigator.userAgentData.getHighEntropyValues(
-                  ["platformVersion", "architecture", "fullVersionList"]);
-                set("uad_platform_version", h.platformVersion);
-                set("uad_arch", h.architecture);
-                set("uad_brands", (h.fullVersionList || []).map(b => b.brand + " " + b.version).join("; "));
-              } catch (e) {}
-            }
-            try {
-              const c = document.createElement("canvas"), x = c.getContext("2d");
-              x.textBaseline = "top"; x.font = "14px Arial"; x.fillText("Claude环境检测", 2, 2);
-              const d = c.toDataURL(); let h = 0;
-              for (let i = 0; i < d.length; i++) h = (h * 31 + d.charCodeAt(i)) | 0;
-              set("canvas", (h >>> 0).toString(16));
-            } catch (e) {}
-            try {
-              const gl = document.createElement("canvas").getContext("webgl");
-              const dbg = gl.getExtension("WEBGL_debug_renderer_info");
-              set("webgl", gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
-              set("webgl_vendor", gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL));
-            } catch (e) {}
-            try {
-              const c = document.createElement("canvas"), x = c.getContext("2d");
-              x.font = "16px sans-serif";
-              set("emojiw", Math.round(x.measureText("\\u{1F600}").width * 10) / 10);
-            } catch (e) {}
-            try {
-              const probe = ["PingFang SC","Hiragino Sans GB","Microsoft YaHei","SimSun","Songti SC","STHeiti","Noto Sans CJK SC"];
-              const sp = document.createElement("span");
-              sp.style.cssText = "position:absolute;left:-9999px;font-size:72px";
-              sp.textContent = "mmmmmmmmmmlli测试";
-              document.body.appendChild(sp);
-              sp.style.fontFamily = "monospace"; const base = sp.offsetWidth;
-              set("fonts", probe.filter(f => { sp.style.fontFamily = "'" + f + "',monospace"; return sp.offsetWidth !== base; }).join(","));
-              sp.remove();
-            } catch (e) {}
-            // 浏览器侧 Claude 服务可达性：和 WebRTC 并行，避免额外延长体检。
-            const reachOne = async (key, url) => {
-              const started = performance.now(), ctl = new AbortController();
-              const timer = setTimeout(() => ctl.abort(), 3500);
-              try {
-                await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctl.signal });
-                set("reach_" + key, "ok");
-                set("reach_" + key + "_ms", Math.round(performance.now() - started));
-              } catch (e) {
-                set("reach_" + key, e && e.name === "AbortError" ? "timeout" : "error");
-                set("reach_" + key + "_ms", "");
-              } finally { clearTimeout(timer); }
-            };
-            const reachPromise = Promise.all([
-              reachOne("claude", "https://claude.ai/"),
-              reachOne("anthropic", "https://www.anthropic.com/"),
-              reachOne("api", "https://api.anthropic.com/")
-            ]);
-            // WebRTC: 明确区分无泄漏、超时、异常和不支持
-            set("rtc_host", ""); set("rtc_srflx", ""); set("rtc_candidate_count", 0);
-            set("rtc_public_count", 0); set("rtc_supported", 0); set("rtc_status", "unsupported");
-            if ("RTCPeerConnection" in window) {
-              set("rtc_supported", 1); set("rtc_status", "collecting");
-              const rtcStarted = performance.now();
-              try {
-                const pc = new RTCPeerConnection({ iceServers: [
-                  { urls: "stun:stun.cloudflare.com:3478" }, { urls: "stun:stun.l.google.com:19302" }] });
-                pc.createDataChannel("p");
-                const hosts = new Set(), srflx = new Set();
-                let candidates = 0, completed = false, finishGathering;
-                const gathered = new Promise(r => { finishGathering = r; });
-                pc.onicecandidate = e => {
-                  if (!e.candidate) { completed = true; finishGathering(); return; }
-                  candidates += 1;
-                  const c = e.candidate.candidate;
-                  const m = c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);
-                  if (!m) return;
-                  if (c.indexOf("typ host") >= 0) hosts.add(m[1]);
-                  if (c.indexOf("typ srflx") >= 0) srflx.add(m[1]);
-                };
-                pc.onicegatheringstatechange = () => {
-                  if (pc.iceGatheringState === "complete") { completed = true; finishGathering(); }
-                };
-                await pc.setLocalDescription(await pc.createOffer());
-                await Promise.race([gathered, new Promise(r => setTimeout(r, 4500))]);
-                set("rtc_host", [...hosts].join(",")); set("rtc_srflx", [...srflx].join(","));
-                set("rtc_candidate_count", candidates); set("rtc_public_count", srflx.size);
-                set("rtc_elapsed_ms", Math.round(performance.now() - rtcStarted));
-                set("rtc_status", srflx.size > 0 ? "ok" : (completed ? "none" : "timeout"));
-                pc.close();
-              } catch (e) {
-                set("rtc_status", "error"); set("rtc_elapsed_ms", Math.round(performance.now() - rtcStarted));
-                set("rtc_err", String(e).slice(0, 60));
-              }
-            }
-            await reachPromise;
-          } catch (e) { set("error", e); }
-          const body = Object.keys(o).map(k => k + "=" + o[k]).join("\\n");
-          try {
-            await fetch("/r?t=\(token)", { method: "POST", body });
-            document.getElementById("s").innerHTML = '<span class="ok">✓ 采集完成</span>';
-            // 把采到的东西摊开给用户看 —— 页面自动消失会让人不知道刚才发生了什么
-            const rows = [
-              ["浏览器", o.uad_brands || navigator.userAgent],
-              ["平台", (o.uad_platform || navigator.platform) + (o.uad_platform_version ? " " + o.uad_platform_version : "")],
-              ["Client Hints", navigator.userAgentData ? "已获取（Chromium）" : "该浏览器不提供（Safari / Firefox）"],
-              ["时区 / 语言", o.tz + " · " + o.languages],
-              ["WebRTC 出口", o.rtc_status === "ok" ? o.rtc_srflx : (o.rtc_status === "none" ? "检测完成，无公网候选" : "检测" + (o.rtc_status || "未知"))],
-              ["渲染环境", o.webgl || "未取到"],
-              ["中文字体", o.fonts ? o.fonts.split(",").length + " 种" : "无"],
-            ];
-            document.getElementById("d").innerHTML =
-              "<table>" + rows.map(r => "<tr><th>" + r[0] + "</th><td>" + r[1] + "</td></tr>").join("") + "</table>";
-            document.getElementById("f").style.display = "block";
-            // 10 秒倒计时后自动关闭，中途可以按住不关 —— 立刻消失会让人不知道发生了什么，
-            // 一直留着又是垃圾标签页
-            let n = 10, stopped = false;
-            const cd = document.getElementById("cd");
-            const keep = document.getElementById("keep");
-            keep.onclick = () => { stopped = true; cd.textContent = "已取消自动关闭，可手动关闭本页。"; keep.style.display = "none"; };
-            const t = setInterval(() => {
-              if (stopped) { clearInterval(t); return; }
-              if (n <= 0) {
-                clearInterval(t);
-                window.close();
-                // 浏览器只允许脚本关闭自己开的窗口，关不掉就说清楚
-                setTimeout(() => { cd.textContent = "可以关闭这个标签页了。"; keep.style.display = "none"; }, 500);
-                return;
-              }
-              cd.textContent = "本页将在 " + n + " 秒后自动关闭";
-              n--;
-            }, 1000);
-          } catch (e) {
-            document.getElementById("s").innerHTML = '<span class="err">回传失败：' + e + '</span>';
+          const set = (k,v) => { o[k] = String(v == null ? "" : v).replace(/\\n/g," "); };
+          const txt = (v,f="未采集") => v == null || v === "" || v === "?" ? f : String(v);
+          const element = (tag, cls, value) => { const e=document.createElement(tag); if(cls)e.className=cls; if(value!=null)e.textContent=String(value); return e; };
+          const duration = v => { const n=Number(v); if(!Number.isFinite(n)||n<0)return "—"; return n<1?Math.round(n*1000)+"ms":n.toFixed(2)+"s"; };
+          const list = v => txt(v,"").split("|").filter(Boolean);
+          const section = (title, description="") => { const s=element("section"); s.append(element("h2","",title)); if(description)s.append(element("p","desc",description)); const rows=element("div","rows"); s.append(rows); content.append(s); return rows; };
+          const addRow = (rows,key,value,mono=false) => { const r=element("div","row"); r.append(element("div","key",key),element("div","value"+(mono?" mono":""),txt(value))); rows.append(r); };
+          const addListSection = (title, values, empty) => { const rows=section(title); const box=element("div","row"); box.append(element("div","key",title)); const value=element("div","value"); if(values.length){const ul=element("ul"); values.forEach(v=>ul.append(element("li","",v))); value.append(ul);}else value.textContent=empty; box.append(value); rows.append(box); };
+          const tone = state => state==="good"?"good":state==="bad"?"bad":state==="warn"?"warn":"neutral";
+          const stateLabel = state => state==="good"?"一致":state==="bad"?"冲突":state==="warn"?"需关注":"数据不足";
+          const matrix = (host,label,state,detail) => { host.append(element("div","",label)); const b=element("div","pill "+tone(state),stateLabel(state)); host.append(b,element("div","detail",detail)); };
+          const splitIPs = v => txt(v,"").split(",").map(x=>x.trim()).filter(Boolean);
+          const sameIP = (a,b) => !!a && !!b && splitIPs(a).includes(b);
+          const hash = value => { let h=2166136261; for(let i=0;i<value.length;i++){h^=value.charCodeAt(i);h=Math.imul(h,16777619);} return (h>>>0).toString(16).padStart(8,"0"); };
+          const browserName = ua => ua.includes("Edg/")?"Microsoft Edge":ua.includes("OPR/")?"Opera":ua.includes("Chrome/")?"Chrome":ua.includes("Safari/")&&!ua.includes("Chrome/")?"Safari":ua.includes("Firefox/")?"Firefox":/MicroMessenger/i.test(ua)?"微信内置浏览器":"未知浏览器";
+          const osName = ua => /Windows NT/i.test(ua)?"Windows":/Android/i.test(ua)?"Android":/iPhone|iPad/i.test(ua)?"iOS":/Macintosh|Mac OS/i.test(ua)?"macOS":/Linux/i.test(ua)?"Linux":navigator.platform||"未知";
+          const escapeClose = () => { try { navigator.sendBeacon("/close?t="+TOKEN, ""); } catch(e){} };
+          window.addEventListener("beforeunload", escapeClose);
+          document.getElementById("close").onclick = () => { escapeClose(); window.close(); setTimeout(()=>{status.textContent="报告已完成，可以手动关闭此标签页。";},300); };
+
+          function renderWaiting(){
+            content.replaceChildren(); const rows=section("浏览器阶段已完成","正在等待本机系统、出口、DNS 与 Claude 连通性检测。");
+            addRow(rows,"浏览器",txt(o.browser_name)); addRow(rows,"平台",txt(o.os_name)+" · "+txt(o.platform));
+            addRow(rows,"浏览器时区",txt(o.tz)+" · UTC"+(Number(o.tzoffset)>=0?"+":"")+txt(o.tzoffset));
+            addRow(rows,"语言 / Locale",txt(o.languages)+" · "+txt(o.locale));
+            addRow(rows,"WebRTC",o.rtc_status==="ok"?txt(o.rtc_srflx):txt(o.rtc_status));
+            addRow(rows,"运行容器",txt(o.runtime_flags,"未发现自动化或内嵌容器特征"));
           }
+
+          function parseSignals(raw){
+            const rows=[], parts=txt(raw,"").split(";"); let current="";
+            parts.forEach(part=>{ if((part.match(/~/g)||[]).length>=4){ if(current)rows.push(current); current=part; } else if(current){ current+=";"+part; } });
+            if(current)rows.push(current);
+            return rows.map(row=>{const f=row.split("~"); return {group:f[0],label:f[1],weight:Number(f[2]||0),points:Number(f[3]||0),value:f.slice(4).join("~")};});
+          }
+
+          function renderReport(report){
+            const c=report.claude||{}, n=report.network||{}, b=report.browser||o, q=report.quality||{};
+            document.title="CheckClaude v"+txt(report.version,"?")+" 完整体检报告";
+            status.replaceChildren(element("span","pill good","检测完成"),element("span","","完整报告已生成，页面不会自动关闭。"));
+            content.replaceChildren();
+            const score=Number(c.score||0), safe=score>=90&&c.grade==="优秀"&&c.consistent==="1";
+            const summary=element("div","summary");
+            [[score+" / 100","环境得分"],[txt(c.grade),"安全等级"],[txt(c.country),"出口国家"],[c.consistent==="1"?"三路一致":"三路不一致","出口状态"]].forEach(x=>{const m=element("div","metric");m.append(element("b","",x[0]),element("span","",x[1]));summary.append(m);});
+            content.append(summary,element("div","verdict "+(safe?"good":score>=70?"warn":"bad"),txt(c.verdict)));
+
+            const matrixSection=element("section"); matrixSection.append(element("h2","","信号一致性矩阵"),element("p","desc","比单项数量更重要的是出口、系统和浏览器彼此是否自洽。")); const matrixHost=element("div","matrix"); matrixSection.append(matrixHost); content.append(matrixSection);
+            matrix(matrixHost,"三路出口",c.consistent==="1"?"good":"bad",c.consistent==="1"?"国内、国外与谷歌侧出口一致":"检测到分流、PAC或不同出口");
+            matrix(matrixHost,"系统时区 ↔ 出口时区",c.systz&&c.iptz&&c.systz===c.iptz?"good":c.iptz&&c.iptz!=="?"?"bad":"neutral",txt(c.systz)+" ↔ "+txt(c.iptz));
+            matrix(matrixHost,"浏览器时区 ↔ 出口时区",b.tz&&c.iptz&&b.tz===c.iptz?"good":b.tz&&c.iptz?"bad":"neutral",txt(b.tz)+" ↔ "+txt(c.iptz));
+            matrix(matrixHost,"WebRTC ↔ 权威出口",b.rtc_status==="none"?"good":b.rtc_status==="ok"?(sameIP(b.rtc_srflx,n.gfw||c.ip)?"good":"bad"):"neutral",b.rtc_status==="none"?"无公网候选":txt(b.rtc_srflx)+" ↔ "+txt(n.gfw||c.ip));
+            matrix(matrixHost,"IPv6 ↔ IPv4 国家",c.ipv6==="无"?"good":c.ipv6country&&c.country&&c.ipv6country===c.country?"good":c.ipv6country&&c.ipv6country!=="?"?"bad":"neutral",txt(c.ipv6)+" · "+txt(c.ipv6country));
+            matrix(matrixHost,"HTTP/JS 浏览器画像",c.brheaders==="ok"?"good":c.brheaders==="conflict"?"bad":"neutral",txt(c.brheaders));
+            matrix(matrixHost,"DNS 解析",/^(正常|代理接管)/.test(c.dnsresult||"")?"good":/污染|失败/.test(c.dnsresult||"")?"bad":"warn",txt(c.dnsresult)+" · "+txt(c.dnsanswer));
+            matrix(matrixHost,"shell ↔ 浏览器连通性",b.reach_api==="ok"&&c.api&&c.api!=="000"?"good":b.reach_api&&b.reach_api!=="ok"?"bad":"neutral","API shell HTTP "+txt(c.api)+" · 浏览器 "+txt(b.reach_api));
+
+            let rows=section("出口与 IP","真实系统探测，不依赖单一浏览器接口。");
+            addRow(rows,"权威出口 IP",n.timezone_ip||n.gfw||c.ip,true); addRow(rows,"国内视角",n.cn,true); addRow(rows,"国外视角",n.intl,true); addRow(rows,"谷歌侧",n.gfw,true);
+            addRow(rows,"国家 / 城市",txt(c.countryname)+" · "+txt(c.country)+" · "+txt(c.city)); addRow(rows,"ISP / ASN",txt(c.isp)+" · "+txt(c.asn)); addRow(rows,"IP 类型",c.iptype); addRow(rows,"经纬度",txt(c.latitude)+", "+txt(c.longitude));
+            addRow(rows,"多源情报",txt(c.intelsources)+" · "+txt(c.intelcount,"0")+" 个来源"); addRow(rows,"IPv6",txt(c.ipv6)+" · "+txt(c.ipv6country));
+            addRow(rows,"Cloudflare",txt(c.cfip)+" · "+txt(c.colo)+" / "+txt(c.cfloc)+" · WARP "+txt(c.cfwarp)); addRow(rows,"代理形态",c.proxymode);
+
+            rows=section("时区、区域与语言"); addRow(rows,"出口 IANA 时区",c.iptz); addRow(rows,"系统时区",c.systz); addRow(rows,"浏览器时区",b.tz); addRow(rows,"UTC 偏移",txt(c.tzoffset)+" · 浏览器 UTC"+(Number(b.tzoffset)>=0?"+":"")+txt(b.tzoffset));
+            addRow(rows,"系统区域 / 语言",txt(c.locale)+" · "+txt(c.langs)); addRow(rows,"Intl Locale",b.locale); addRow(rows,"浏览器语言",b.languages); addRow(rows,"语言变体",b.language_variant); addRow(rows,"Emoji 风格",b.emoji_style);
+
+            rows=section("WebRTC 与泄漏面"); addRow(rows,"探测状态",b.rtc_status); addRow(rows,"srflx 公网出口",txt(b.rtc_srflx,"无"),true); addRow(rows,"host 候选",txt(b.rtc_host,"无"),true); addRow(rows,"候选 / 公网候选",txt(b.rtc_candidate_count,"0")+" / "+txt(b.rtc_public_count,"0")); addRow(rows,"耗时 / 错误",txt(b.rtc_elapsed_ms,"—")+"ms · "+txt(b.rtc_err,"无"));
+
+            rows=section("DNS"); addRow(rows,"实际 DNS 服务器",c.dnsservers,true); addRow(rows,"DNS 作用域",c.dns); addRow(rows,"claude.ai 解析",c.dnsanswer,true); addRow(rows,"判定",c.dnsresult);
+
+            rows=section("Claude 连通性"); addRow(rows,"Anthropic API（shell）","HTTP "+txt(c.api)); addRow(rows,"claude.ai（shell）","HTTP "+txt(c.web)); addRow(rows,"anthropic.com（shell）","HTTP "+txt(c.site));
+            addRow(rows,"claude.ai（浏览器）",txt(b.reach_claude)+" · "+txt(b.reach_claude_ms,"—")+"ms"); addRow(rows,"anthropic.com（浏览器）",txt(b.reach_anthropic)+" · "+txt(b.reach_anthropic_ms,"—")+"ms"); addRow(rows,"API（浏览器）",txt(b.reach_api)+" · "+txt(b.reach_api_ms,"—")+"ms"); addRow(rows,"Claude Code",txt(c.claudever)+" · "+txt(c.base));
+
+            rows=section("浏览器、设备与运行容器"); addRow(rows,"浏览器 / 系统",txt(b.browser_name)+" · "+txt(b.os_name)+" · "+txt(b.device_type)); addRow(rows,"JavaScript UA",b.ua_js,true); addRow(rows,"HTTP User-Agent",b.ua,true); addRow(rows,"Client Hints",txt(b.uad_platform)+" · "+txt(b.uad_arch)+" · "+txt(b.uad_brands));
+            addRow(rows,"运行容器",txt(b.runtime_flags,"未发现自动化或内嵌容器特征")); addRow(rows,"屏幕",txt(b.screen)+" · DPR "+txt(b.pixel_ratio)); addRow(rows,"硬件",txt(b.hardware_concurrency)+" 核 · 内存 "+txt(b.device_memory,"未知")+"GB · 触控点 "+txt(b.max_touch_points,"0"));
+            addRow(rows,"隐私 / 存储","Cookie "+txt(b.cookie_enabled)+" · LocalStorage "+txt(b.local_storage)+" · DNT "+txt(b.dnt)); addRow(rows,"插件 / MIME",txt(b.plugins_count,"0")+" / "+txt(b.mime_types_count,"0"));
+            addRow(rows,"Network Information",txt(b.connection_type)+" · RTT "+txt(b.connection_rtt,"—")+"ms · 下行 "+txt(b.connection_downlink,"—")+"Mbps · 省流 "+txt(b.connection_save_data));
+            addRow(rows,"WebGL Vendor",b.webgl_vendor); addRow(rows,"WebGL Renderer",b.webgl_renderer); addRow(rows,"Canvas Hash",b.canvas,true); addRow(rows,"中文字体",txt(b.fonts,"无")); addRow(rows,"厂商字体",txt(b.fonts_vendor,"无"));
+
+            rows=section("HTTPS/TCP 线路质量","最近 24 小时成功率与本次 TCP、TLS、TTFB、总耗时。");
+            [["cn","国内"],["intl","国外"],["gfw","谷歌侧"],["google","Google 204"]].forEach(([key,label])=>{const v=q[key]||{};addRow(rows,label,txt(v.successRate,"0")+"% 成功 · 失败 "+txt(v.failures,"0")+" · TCP "+duration(v.connect)+" · TLS "+duration(v.tls)+" · TTFB "+duration(v.ttfb)+" · 总耗时 "+duration(v.total)+" · 抖动 "+duration(v.jitter)+" · HTTP "+txt(v.http));});
+
+            const signals=parseSignals(c.signals); const signalSection=element("section"); signalSection.append(element("h2","","26 项加权评分明细"),element("p","desc","新增浏览器诊断只作为证据展示；安全档位仍由经过测试的 100 分模型决定。")); const table=element("table","signal-table"); const head=element("tr");["分组","检测项","证据","得分"].forEach(v=>head.append(element("th","",v))); const thead=element("thead");thead.append(head);const tbody=element("tbody");signals.forEach(s=>{const tr=element("tr");tr.append(element("td","",s.group),element("td","",s.label),element("td","",s.value),element("td",s.points===s.weight?"full":"miss",s.points+" / "+s.weight));tbody.append(tr);});table.append(thead,tbody);signalSection.append(table);content.append(signalSection);
+
+            addListSection("发现的问题",list(c.issues),"未发现明确的环境矛盾信号"); addListSection("修复建议",list(c.fixes),"当前没有修复建议");
+            if(c.gains){const grow=section("提分清单");list(c.gains).forEach(item=>{const f=item.split("~");addRow(grow,f[0]+"（+"+txt(f[1],"0")+"）",f.slice(2).join("~"));});}
+            rows=section("支付与账号地区（人工核对）","本工具不读取账号或付款资料，因此不会伪装成已自动检测。"); addRow(rows,"账号注册地区","请确认与长期出口国家一致"); addRow(rows,"账单国家","请确认与账号及出口一致"); addRow(rows,"支付卡发行国","请人工确认，不纳入自动评分");
+            const note=element("p","footer","报告生成于 "+txt(report.generatedAt)+" · CheckClaude v"+txt(report.version)); content.append(note);
+            fetch("/close?t="+TOKEN,{method:"POST",body:"",keepalive:true}).catch(()=>{});
+          }
+
+          async function pollReport(){
+            for(let i=0;i<200;i++){
+              try{const r=await fetch("/report?t="+TOKEN,{cache:"no-store"});if(r.status===200){renderReport(await r.json());return;}}catch(e){}
+              await new Promise(resolve=>setTimeout(resolve,750));
+            }
+            status.replaceChildren(element("span","pill bad","超时"),element("span","","系统检测没有在预期时间内完成，请从菜单栏重新体检。"));
+          }
+
+          async function collect(){
+            try{
+              const ua=navigator.userAgent||"", lower=ua.toLowerCase(), ro=Intl.DateTimeFormat().resolvedOptions();
+              set("ua_js",ua);set("browser_name",browserName(ua));set("os_name",osName(ua));set("device_type",/iPhone/i.test(ua)?"iPhone":/iPad/i.test(ua)?"iPad":/Android/i.test(ua)?"Android 设备":/Mac/i.test(ua)?"Mac":/Windows/i.test(ua)?"Windows PC":"未知设备");
+              set("languages",(navigator.languages||[navigator.language]).filter(Boolean).join(","));set("language_variant",/zh-(tw|hk|mo)|zh-hant/i.test(o.languages)?"繁体中文":/zh-cn|zh-sg|zh-hans|(^|,)zh(,|$)/i.test(o.languages)?"简体中文":"非中文或未识别");
+              set("tz",ro.timeZone);set("locale",ro.locale);set("calendar",ro.calendar);set("numbering_system",ro.numberingSystem);set("hour_cycle",ro.hourCycle);set("tzoffset",-new Date().getTimezoneOffset()/60);
+              set("platform",navigator.platform);set("vendor",navigator.vendor);set("hardware_concurrency",navigator.hardwareConcurrency);set("device_memory",navigator.deviceMemory||"");set("max_touch_points",navigator.maxTouchPoints||0);
+              set("screen",screen.width+"×"+screen.height+" / 可用 "+screen.availWidth+"×"+screen.availHeight+" / "+screen.colorDepth+"bit");set("pixel_ratio",window.devicePixelRatio||1);
+              set("cookie_enabled",navigator.cookieEnabled?"可用":"禁用");set("dnt",navigator.doNotTrack||window.doNotTrack||"未设置");set("global_privacy_control",navigator.globalPrivacyControl===true?"启用":"未启用/不支持");set("plugins_count",navigator.plugins?navigator.plugins.length:0);set("mime_types_count",navigator.mimeTypes?navigator.mimeTypes.length:0);
+              try{localStorage.setItem("__cc_probe","1");localStorage.removeItem("__cc_probe");set("local_storage","可用");}catch(e){set("local_storage","不可用");}
+              const conn=navigator.connection||navigator.mozConnection||navigator.webkitConnection||{};set("connection_type",conn.effectiveType||conn.type||"浏览器不提供");set("connection_rtt",conn.rtt||"");set("connection_downlink",conn.downlink||"");set("connection_save_data",conn.saveData?"开启":"关闭/不支持");
+              const flags=[];if(navigator.webdriver)flags.push("navigator.webdriver");if(/HeadlessChrome|PhantomJS/i.test(ua))flags.push("Headless");if(window.top!==window.self)flags.push("iframe");if(lower.includes("; wv)")||lower.includes(" webview")||(lower.includes("version/")&&lower.includes(" chrome/")))flags.push("WebView");if(/MicroMessenger|Weibo/i.test(ua)||ua.includes("QQ/"))flags.push("内嵌浏览器");set("runtime_flags",flags.join(", "));
+              set("emoji_style",/iPhone|iPad|Mac OS/i.test(ua)?"Apple Emoji":/Android|HarmonyOS/i.test(ua)?"Android / 厂商 Emoji":/Windows/i.test(ua)?"Windows Emoji":"未知");
+              set("feature_webgpu","gpu" in navigator?"支持":"不支持");set("feature_wasm",typeof WebAssembly!=="undefined"?"支持":"不支持");set("feature_service_worker","serviceWorker" in navigator?"支持":"不支持");set("feature_webcrypto",window.crypto&&crypto.subtle?"支持":"不支持");
+              if(navigator.userAgentData){set("uad_mobile",navigator.userAgentData.mobile);set("uad_platform",navigator.userAgentData.platform);try{const h=await navigator.userAgentData.getHighEntropyValues(["platformVersion","architecture","fullVersionList"]);set("uad_platform_version",h.platformVersion);set("uad_arch",h.architecture);set("uad_brands",(h.fullVersionList||[]).map(x=>x.brand+" "+x.version).join("; "));}catch(e){}}
+              try{const c=document.createElement("canvas");c.width=280;c.height=60;const x=c.getContext("2d");x.fillStyle="#f60";x.fillRect(8,8,80,28);x.fillStyle="#069";x.font="16px Arial";x.fillText("CheckClaude 环境检测 🧭",12,27);set("canvas",hash(c.toDataURL()));}catch(e){}
+              try{const c=document.createElement("canvas"),gl=c.getContext("webgl")||c.getContext("experimental-webgl"),dbg=gl&&gl.getExtension("WEBGL_debug_renderer_info");if(gl){set("webgl_vendor",dbg?gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR));set("webgl_renderer",dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER));set("webgl",o.webgl_vendor+" · "+o.webgl_renderer);}}catch(e){}
+              try{const probe=["PingFang SC","PingFang TC","Hiragino Sans GB","Microsoft YaHei","Microsoft JhengHei","SimSun","SimHei","MingLiU","Songti SC","STHeiti","Noto Sans CJK SC","Noto Sans CJK TC","Source Han Sans SC","MiSans","HarmonyOS Sans SC","OPPO Sans","vivo Sans"];const sp=document.createElement("span");sp.style.cssText="position:absolute;left:-9999px;font-size:72px";sp.textContent="mmmmmmmmmmlli测试";document.body.appendChild(sp);sp.style.fontFamily="monospace";const base=sp.offsetWidth;const found=probe.filter(f=>{sp.style.fontFamily="'"+f+"',monospace";return sp.offsetWidth!==base;});sp.remove();set("fonts",found.join(","));set("fonts_sc",found.filter(f=>/SC|YaHei|SimSun|SimHei|Songti|STHeiti|MiSans|HarmonyOS|OPPO|vivo|Hiragino/i.test(f)).join(","));set("fonts_tc",found.filter(f=>/TC|JhengHei|MingLiU|PingFang TC/i.test(f)).join(","));set("fonts_vendor",found.filter(f=>/MiSans|HarmonyOS|OPPO|vivo/i.test(f)).join(","));}catch(e){}
+              const reachOne=async(key,url)=>{const started=performance.now(),ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),3500);try{await fetch(url,{mode:"no-cors",cache:"no-store",signal:ctl.signal});set("reach_"+key,"ok");set("reach_"+key+"_ms",Math.round(performance.now()-started));}catch(e){set("reach_"+key,e&&e.name==="AbortError"?"timeout":"error");set("reach_"+key+"_ms","");}finally{clearTimeout(timer);}};
+              const reachPromise=Promise.all([reachOne("claude","https://claude.ai/"),reachOne("anthropic","https://www.anthropic.com/"),reachOne("api","https://api.anthropic.com/")]);
+              set("rtc_host","");set("rtc_srflx","");set("rtc_candidate_count",0);set("rtc_public_count",0);set("rtc_supported",0);set("rtc_status","unsupported");
+              if("RTCPeerConnection" in window){set("rtc_supported",1);set("rtc_status","collecting");const started=performance.now();try{const pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.cloudflare.com:3478"},{urls:"stun:stun.l.google.com:19302"}]});pc.createDataChannel("p");const hosts=new Set(),srflx=new Set();let candidates=0,completed=false,finish;const gathered=new Promise(r=>{finish=r;});pc.onicecandidate=e=>{if(!e.candidate){completed=true;finish();return;}candidates++;const c=e.candidate.candidate,m=c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);if(!m)return;if(c.includes("typ host"))hosts.add(m[1]);if(c.includes("typ srflx"))srflx.add(m[1]);};pc.onicegatheringstatechange=()=>{if(pc.iceGatheringState==="complete"){completed=true;finish();}};await pc.setLocalDescription(await pc.createOffer());await Promise.race([gathered,new Promise(r=>setTimeout(r,4500))]);set("rtc_host",[...hosts].join(","));set("rtc_srflx",[...srflx].join(","));set("rtc_candidate_count",candidates);set("rtc_public_count",srflx.size);set("rtc_elapsed_ms",Math.round(performance.now()-started));set("rtc_status",srflx.size>0?"ok":completed?"none":"timeout");pc.close();}catch(e){set("rtc_status","error");set("rtc_elapsed_ms",Math.round(performance.now()-started));set("rtc_err",String(e).slice(0,80));}}
+              await reachPromise;
+              const body=Object.keys(o).map(k=>k+"="+o[k]).join("\\n");
+              const response=await fetch("/r?t="+TOKEN,{method:"POST",headers:{"Content-Type":"text/plain;charset=UTF-8"},body,cache:"no-store"});if(!response.ok)throw new Error("HTTP "+response.status);
+              status.replaceChildren(element("span","spinner"),element("span","","浏览器信号已完成，正在汇总系统、出口、DNS与评分结果…"));renderWaiting();await pollReport();
+            }catch(e){status.replaceChildren(element("span","pill bad","采集失败"),element("span","",String(e)));}
+          }
+          collect();
         })();
-        </script>
+        </script></body></html>
         """
     }
 }

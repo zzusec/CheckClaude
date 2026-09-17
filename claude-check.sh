@@ -4,8 +4,9 @@
 #
 # 评分模型参考 https://github.com/yacuo/check-cc (MIT)，但那边是浏览器端检测(WebRTC /
 # Client Hints / Emoji 渲染 / 字体探测靠 JS 拿)，这里是 macOS 本地实现: 凡是 shell 能测的
-# 信号全部覆盖(出口/质量/画像/DNS/稳定 共 16 项)，浏览器独有的 4 项(WebRTC 泄漏、浏览器
-# 时区语言、渲染环境)由菜单栏 App 的浏览器桥接采集后写文件，这里读取，合计 26 项。
+# 信号全部覆盖(出口/质量/画像/DNS/稳定)，浏览器独有的 WebRTC、时区语言、请求头和
+# 渲染信号由菜单栏 App 的浏览器桥接采集。评分仍是经过测试的 26 项/100 分；v4.6 起
+# 另采集 40+ 原始诊断维度用于完整报告，不把未经校准的新字段偷偷加入评分。
 #
 # 用法:
 #   ./claude-check.sh              # 体检并打印报告
@@ -166,6 +167,7 @@ fetch_all() {
 }
 
 jget() { grep -Eo "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null | head -1 | cut -d'"' -f4; }
+jnum() { grep -Eo "\"$2\"[[:space:]]*:[[:space:]]*-?[0-9]+([.][0-9]+)?" "$1" 2>/dev/null | head -1 | sed 's/.*:[[:space:]]*//'; }
 ip_country_code() {
   local ip="$1"
   jget <($CURL "http://ip-api.com/json/${ip}?fields=countryCode") countryCode 2>/dev/null
@@ -183,6 +185,7 @@ parse_net() {
   # "US"、"United States"、IPv6 或 CDN 中间节点混成冲突。
   COUNTRY2=$(jget "$TMP/ipinfo" country); ISP2=$(jget "$TMP/ipinfo" org)
   COUNTRY3=$(jget "$TMP/ipwho" country_code); ISP3=$(jget "$TMP/ipwho" org)
+  LATITUDE=$(jnum "$TMP/ipwho" latitude); LONGITUDE=$(jnum "$TMP/ipwho" longitude)
   COUNTRY4=$(jget "$TMP/ipsb" country_code); ISP4=$(jget "$TMP/ipsb" organization)
   COUNTRY=$(printf '%s' "$COUNTRY" | tr '[:lower:]' '[:upper:]')
   COUNTRY2=$(printf '%s' "$COUNTRY2" | tr '[:lower:]' '[:upper:]')
@@ -1014,8 +1017,11 @@ write_cstatus() {
     echo "score=$SCORE"; echo "grade=$GRADE"; echo "verdict=$VERDICT"
     echo "ip=${PROBE_IP}"; echo "country=${COUNTRY:-?}"; echo "countryname=${COUNTRY_NAME:-?}"
     echo "city=${CITY:-?}"; echo "isp=${ISP:-?}"; echo "asn=${ASN:-?}"; echo "iptype=$iptype"
-    echo "colo=${CF_COLO:-?}"; echo "api=${API_CODE}"; echo "web=${WEB_CODE}"
+    echo "latitude=${LATITUDE:-?}"; echo "longitude=${LONGITUDE:-?}"
+    echo "colo=${CF_COLO:-?}"; echo "cfloc=${CF_LOC:-?}"; echo "cfip=${CF_IP:-?}"; echo "cfwarp=${CF_WARP:-?}"
+    echo "api=${API_CODE}"; echo "web=${WEB_CODE}"; echo "site=${SITE_CODE}"; echo "apiregionblock=${API_REGION_BLOCK:-0}"
     echo "intelsources=${INTEL_SOURCES:-未采集}"; echo "intelcount=${INTEL_COUNT:-0}"
+    echo "ipv6=${IPV6:-无}"; echo "ipv6country=${IPV6_CC:-?}"
     echo "consistent=${CONSISTENT}"; echo "systz=${SYS_TZ}"; echo "iptz=${GFW_TZ:-?}"
     echo "tzoffset=${TZ_OFFSET} ${TZ_ABBR}"; echo "locale=${SYS_LOCALE:-?}"; echo "langs=${SYS_LANGS:-?}"
     echo "os=${OS_VER}"; echo "proxymode=${PROXY_MODE}"
@@ -1029,7 +1035,8 @@ write_cstatus() {
     echo "brapi=${BR_REACH_API:-未采集}"; echo "brapims=${BR_REACH_API_MS:-}"
     echo "brheaders=${BR_HEADER_INTEGRITY:-unknown}"
     echo "brfetch=${BR_SF_SITE:-?}/${BR_SF_MODE:-?}/${BR_SF_DEST:-?}"
-    echo "dns=${DNS_SCOPE}"; echo "dnsresult=${DNS_VERDICT}"
+    echo "dns=${DNS_SCOPE}"; echo "dnsservers=${DNS_SERVERS:-未获取}"
+    echo "dnsanswer=${DNS_RESULT:-无}"; echo "dnsresult=${DNS_VERDICT}"
     echo "claudever=${CLAUDE_VER:-未安装}"; echo "base=${CLAUDE_BASE:-官方}"
     echo "fixable=$( [[ -n "$(fixable_list)" ]] && echo 1 || echo 0 )"
     echo "fixlist=$(fixable_list)"
