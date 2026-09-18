@@ -43,6 +43,7 @@ base_signals; compute_score
 check "满分" "$SCORE" 100
 check "无问题" "$ISSUES" ""
 check "26 项信号" "${#SIGNALS[@]}" 26
+check "满分环境风险档位" "$RISK_LEVEL/$SAFE_USE" "安全/1"
 
 echo "② 权重表合计必须正好 100(防止加信号时算错总分)"
 total=0; for r in "${SIGNALS[@]}"; do IFS='~' read -r _ _ w _ _ <<<"$r"; total=$((total+w)); done
@@ -129,6 +130,7 @@ base_signals; CONSISTENT=0; compute_score
 check "评级为风险" "$GRADE" 风险
 check "点名分流" "$(echo "$VERDICT" | grep -c "出口 IP 分流")" 1
 check "三路不一致硬降级不受分数影响" "$([[ $SCORE -ge 70 ]] && echo yes)" yes
+check "三路不一致显示高风险" "$RISK_LEVEL/$SAFE_USE" "高风险/0"
 
 echo "⑮ 85-89 分不算可用(绿档门槛是 90)"
 base_signals; compute_score
@@ -136,6 +138,9 @@ base_signals; compute_score
 SYS_TZ=Asia/Shanghai; GFW_TZ=America/New_York; SYS_LOCALE=zh_CN; SYS_LANG=zh; LOCALE_CC=CN; HOSTING=1
 compute_score
 check "85-89 分不叫优秀" "$([[ $SCORE -ge 85 && $SCORE -lt 90 && $GRADE != 优秀 ]] && echo yes || echo "$SCORE/$GRADE")" yes
+check "关键时区冲突即使 85-89 分仍是高风险" "$RISK_LEVEL/$SAFE_USE" "高风险/0"
+SCORE=87; GRADE="有风险"; COUNTRY=US; classify_risk ""
+check "无关键项失败的 85-89 分显示低风险" "$RISK_LEVEL/$SAFE_USE" "低风险/0"
 
 echo "⑯ WebRTC 明确完成且无公网候选 => 满分"
 base_signals; BR_RTC=""; BR_RTC_STATUS=none; BR_RTC_PUBLIC_COUNT=0; compute_score
@@ -234,6 +239,13 @@ check "写入 Cloudflare 来源" "$(status_value "$CSTATUS" cfip)/$(status_value
 check "写入出口坐标" "$(status_value "$CSTATUS" latitude),$(status_value "$CSTATUS" longitude)" "34.0522,-118.2437"
 check "写入 IPv6 证据" "$(status_value "$CSTATUS" ipv6)/$(status_value "$CSTATUS" ipv6country)" "2001:db8::1/US"
 check "写入网站连通状态" "$(status_value "$CSTATUS" api)/$(status_value "$CSTATUS" web)/$(status_value "$CSTATUS" site)" "401/200/200"
+check "写入风险档位和使用结论" "$(status_value "$CSTATUS" risklevel)/$(status_value "$CSTATUS" safeuse)" "安全/1"
+
+echo "㉗ 无法自动完成的代理/DNS 项仍展示可点击修复指引"
+base_signals; PROXY_MODE="直连"; DNS_SCOPE="境外/自定义(8.8.8.8)"; compute_score; AUTO_FIXED_ITEMS=""
+guide=$(show_manual_guide 0 2>/dev/null)
+check "保留代理形态手动指引" "$(echo "$guide" | grep -c '代理形态' || true)" 1
+check "保留 DNS 出口手动指引" "$(echo "$guide" | grep -c 'DNS 出口' || true)" 1
 
 echo ""
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "有用例失败"; exit 1; }

@@ -361,6 +361,26 @@ parse_claude() {
     CLAUDE_BASE=$(grep -E '^[[:space:]]*export[[:space:]]+ANTHROPIC_BASE_URL' "$HOME/.zshrc" | tail -1 | cut -d= -f2- | tr -d '"'"'"' ')
 }
 
+# 把分数、关键项和地区硬限制合并成用户能直接理解的风险档位。
+classify_risk() {
+  local critical="${1:-}"
+  SAFE_USE=0
+  if [[ "$GRADE" == "优秀" ]]; then
+    RISK_LEVEL="安全"; SAFE_USE=1
+  elif [[ "$GRADE" == "风险" || "$GRADE" == "高风险" || -n "$critical" ]] \
+       || { [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; }; then
+    [[ $SCORE -lt 50 || "$GRADE" == "危险" ]] && RISK_LEVEL="极高风险" || RISK_LEVEL="高风险"
+  elif [[ $SCORE -ge 85 ]]; then
+    RISK_LEVEL="低风险"
+  elif [[ $SCORE -ge 70 ]]; then
+    RISK_LEVEL="中风险"
+  elif [[ $SCORE -ge 50 ]]; then
+    RISK_LEVEL="高风险"
+  else
+    RISK_LEVEL="极高风险"
+  fi
+}
+
 # ── 打分: 26 项加权信号，合计 100 ───────────────────────────────
 compute_score() {
   SIGNALS=(); SCORE=0; ISSUES=""; FIXES=""; FIXABLE_TZ=""; FIXABLE_LOCALE=""
@@ -768,6 +788,9 @@ compute_score() {
   elif [[ $SCORE -ge 50 ]]; then GRADE="高风险"; VERDICT="多项信号冲突，不建议在当前环境登录或使用 Claude"
   else                           GRADE="危险"; VERDICT="环境画像严重冲突，使用 Claude 有较高封号风险"
   fi
+
+  # 分数只是量化参考；关键项失败、不支持地区或三路分流必须覆盖高分。
+  classify_risk "$crit_fail"
 }
 
 
@@ -786,11 +809,19 @@ gain_hint() {
     "系统时区匹配出口")  echo "点「一键修复」即可自动改" ;;
     "时区偏移自洽")      echo "清掉 shell 里的 TZ 环境变量后重开终端" ;;
     "系统区域匹配出口")  echo "菜单里点「把系统区域改为 XX」" ;;
-    "代理形态")          echo "代理开 TUN / 虚拟网卡模式，关掉 PAC 分流" ;;
+    "代理形态")
+      if [[ "$PAC_ON" == "1" ]]; then echo "点一键修复关闭 PAC；再在代理客户端开启 TUN / 虚拟网卡模式"
+      elif [[ "$CONSISTENT" == "1" && "$CF_IP" == "$PROBE_IP" ]]; then echo "三路与 Cloudflare 出口已一致；若代理在路由器/网关上可忽略，否则在代理客户端开启 TUN"
+      else echo "在代理客户端开启 TUN / 虚拟网卡模式，并关闭 PAC/自动分流"
+      fi ;;
     "出口稳定性")        echo "固定一个节点，24 小时内别切线路(到点自动回满)" ;;
     "运行容器")          echo "在物理机上登录和使用，别在虚拟机里" ;;
     "claude.ai 解析")     echo "换 DNS 或让代理接管 DNS" ;;
-    "DNS 出口")          echo "点「一键修复」自动换成验证过的境外 DNS" ;;
+    "DNS 出口")
+      if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then echo "点「一键修复」换成验证过的境外 DNS"
+      elif [[ "$DNS_SCOPE" == 境外/自定义* ]]; then echo "当前境外 DNS 可用；若要满分，让代理 TUN/fake-ip 接管 DNS，否则此 1 分可忽略"
+      else echo "让代理接管 DNS（fake-ip/加密 DNS），避免解析路径与出口不一致"
+      fi ;;
     "WebRTC 出口")       echo "代理开 TUN 模式接管 UDP，或浏览器禁用 WebRTC" ;;
     "浏览器时区")        echo "重启浏览器，让它重新读系统时区" ;;
     "浏览器语言")        echo "把浏览器首选语言调成 en-US" ;;
@@ -922,6 +953,7 @@ PLIST
 
 apply_fixes() {
   local done_any=0 svc
+  AUTO_FIXED_ITEMS=""
   svc=$(active_service)
 
   # 1. 时区(无副作用，靠已配的免密 sudo)
@@ -932,6 +964,7 @@ apply_fixes() {
     TZ_OFFSET=$(date +%z); TZ_ABBR=$(date +%Z)
     if [[ "$SYS_TZ" == "$FIXABLE_TZ" ]]; then
       echo "  ✅ 已改为 $SYS_TZ"; log "fix: 时区 -> $SYS_TZ"; done_any=1
+      AUTO_FIXED_ITEMS+="|系统时区匹配出口|"
     else
       echo "  ⚠️  失败，需先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
     fi
@@ -943,6 +976,7 @@ apply_fixes() {
     if sudo -n /usr/sbin/networksetup -setautoproxystate "$svc" off >/dev/null 2>&1; then
       echo "  ✅ 已关闭(撤销: networksetup -setautoproxystate \"$svc\" on)"
       log "fix: 关闭 PAC ($svc)"; PAC_ON=0; PROXY_MODE="${PROXY_MODE% + PAC 分流}"; done_any=1
+      AUTO_FIXED_ITEMS+="|代理形态|"
     else
       echo "  ⚠️  需要授权，先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
     fi
@@ -951,8 +985,11 @@ apply_fixes() {
   # 3. DNS 泄漏 -> 换成验证过的境外 DNS(投毒时才退回 DoH)
   if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then
     echo "→ 修复 DNS 泄漏 (当前 $DNS_SCOPE)"
-    if [[ -n "$svc" ]]; then fix_dns_servers "$svc"; else echo "  ⚠️  找不到活跃网络服务"; fi
-    done_any=1
+    if [[ -n "$svc" ]] && fix_dns_servers "$svc"; then
+      done_any=1; AUTO_FIXED_ITEMS+="|DNS 出口|"
+    elif [[ -z "$svc" ]]; then
+      echo "  ⚠️  找不到活跃网络服务"
+    fi
   fi
 
   # 4. 系统区域(会影响日期格式显示，需显式 --fix-locale)
@@ -979,8 +1016,9 @@ show_manual_guide() {
   build_gains
   while IFS='~' read -r l d h; do
     [[ -z "$l" ]] && continue
-    # 这三项刚才已经自动处理过，不再重复要求用户做
-    case "$l" in 系统时区匹配出口|"DNS 出口"|代理形态) continue ;; esac
+    # 只跳过本轮确实自动修复成功的项；“代理形态/DNS 出口”有时只能手动处理，
+    # 不能因为标签属于可修类别就把指引吞掉。
+    case "${AUTO_FIXED_ITEMS:-}" in *"|$l|"*) continue ;; esac
     n=$((n+1))
     body+="${n}. ${l}（+${d} 分）${nl}   ${h}${nl}"
   done <<<"$(echo "$GAINS" | tr '|' '\n')"
@@ -1014,7 +1052,8 @@ write_cstatus() {
   iptype=$( [[ "$PROXY" == 1 ]] && echo 代理/VPN || { [[ "$HOSTING" == 1 ]] && echo 机房IDC || { [[ "$HOSTING" == -1 ]] && echo 未知 || echo 住宅; }; } )
   {
     echo "time=$(date '+%Y-%m-%d %H:%M:%S')"
-    echo "score=$SCORE"; echo "grade=$GRADE"; echo "verdict=$VERDICT"
+    echo "score=$SCORE"; echo "grade=$GRADE"; echo "risklevel=${RISK_LEVEL:-未知}"
+    echo "safeuse=${SAFE_USE:-0}"; echo "verdict=$VERDICT"
     echo "ip=${PROBE_IP}"; echo "country=${COUNTRY:-?}"; echo "countryname=${COUNTRY_NAME:-?}"
     echo "city=${CITY:-?}"; echo "isp=${ISP:-?}"; echo "asn=${ASN:-?}"; echo "iptype=$iptype"
     echo "latitude=${LATITUDE:-?}"; echo "longitude=${LONGITUDE:-?}"

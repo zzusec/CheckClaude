@@ -98,10 +98,16 @@ struct NetworkHistoryPoint {
 // 每一路独立折线，能直接看出是国内、国外、谷歌侧还是 Google 连通性在失败。
 final class NetworkHistoryView: NSView {
     private let points: [NetworkHistoryPoint]
+    private var hoverIndex: Int?
+    private var hoverTrackingArea: NSTrackingArea?
+    private let chartLeft: CGFloat = 54
+    private let chartRight: CGFloat = 10
+    private let chartTop: CGFloat = 24
+    private let chartRowHeight: CGFloat = 18.5
 
     init(points: [NetworkHistoryPoint]) {
         self.points = points
-        super.init(frame: NSRect(origin: .zero, size: NSSize(width: 350, height: 116)))
+        super.init(frame: NSRect(origin: .zero, size: NSSize(width: 430, height: 138)))
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
         setAccessibilityLabel(accessibilitySummary())
@@ -118,11 +124,60 @@ final class NetworkHistoryView: NSView {
             return "\(route.title)失败\(failures)次"
         }.joined(separator: "，")
         let changes = points.filter(\.ipChanged).count
-        return "最近\(points.count)次 HTTPS/TCP 检测，\(routeText)，确认换IP\(changes)次"
+        return "最近\(points.count)次线路检测，\(routeText)，确认换IP\(changes)次"
     }
 
     private func drawText(_ text: String, at point: NSPoint, font: NSFont, color: NSColor) {
         (text as NSString).draw(at: point, withAttributes: [.font: font, .foregroundColor: color])
+    }
+
+    private var plotWidth: CGFloat { max(1, bounds.width - chartLeft - chartRight) }
+    private var plotBottom: CGFloat { chartTop + chartRowHeight * CGFloat(NetworkRoute.allCases.count) }
+
+    private func xPosition(_ index: Int) -> CGFloat {
+        guard points.count > 1 else { return chartLeft + plotWidth }
+        return chartLeft + CGFloat(index) * plotWidth / CGFloat(points.count - 1)
+    }
+
+    private func durationText(_ point: NetworkHistoryPoint, route: NetworkRoute) -> String {
+        guard point.succeeded(route) else { return "失败" }
+        let seconds = point.seconds(for: route)
+        return seconds < 1 ? "\(Int((seconds * 1000).rounded()))ms" : String(format: "%.2fs", seconds)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard !points.isEmpty else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard point.x >= chartLeft, point.x <= chartLeft + plotWidth,
+              point.y >= chartTop - 4, point.y <= bounds.height else {
+            if hoverIndex != nil { hoverIndex = nil; needsDisplay = true }
+            return
+        }
+        let ratio = max(0, min(1, (point.x - chartLeft) / plotWidth))
+        let index = points.count == 1 ? 0 : Int((ratio * CGFloat(points.count - 1)).rounded())
+        if hoverIndex != index { hoverIndex = index; needsDisplay = true }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverIndex = nil
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -130,7 +185,7 @@ final class NetworkHistoryView: NSView {
         let titleFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
         let labelFont = NSFont.systemFont(ofSize: 9.5, weight: .medium)
         let noteFont = NSFont.systemFont(ofSize: 9)
-        drawText("最近 \(points.count) 次 HTTPS/TCP 趋势", at: NSPoint(x: 8, y: 5),
+        drawText("最近 \(points.count) 次线路延迟", at: NSPoint(x: 8, y: 5),
                  font: titleFont, color: .labelColor)
 
         guard !points.isEmpty else {
@@ -139,35 +194,24 @@ final class NetworkHistoryView: NSView {
             return
         }
 
-        let left: CGFloat = 54
-        let right: CGFloat = 10
-        let top: CGFloat = 24
-        let rowHeight: CGFloat = 18.5
-        let plotWidth = max(1, bounds.width - left - right)
-        let plotBottom = top + rowHeight * CGFloat(NetworkRoute.allCases.count)
-
-        func xPosition(_ index: Int) -> CGFloat {
-            guard points.count > 1 else { return left + plotWidth }
-            return left + CGFloat(index) * plotWidth / CGFloat(points.count - 1)
-        }
 
         // 已确认的换 IP 用贯穿四路的红线标记，和单路接口失败区分开。
         NSColor.systemRed.withAlphaComponent(0.55).setStroke()
         for (index, point) in points.enumerated() where point.ipChanged {
             let x = xPosition(index)
             let marker = NSBezierPath()
-            marker.move(to: NSPoint(x: x, y: top))
+            marker.move(to: NSPoint(x: x, y: chartTop))
             marker.line(to: NSPoint(x: x, y: plotBottom))
             marker.lineWidth = 1.2
             marker.stroke()
         }
 
         for (routeIndex, route) in NetworkRoute.allCases.enumerated() {
-            let rowTop = top + CGFloat(routeIndex) * rowHeight
-            let rowBottom = rowTop + rowHeight - 4
+            let rowTop = chartTop + CGFloat(routeIndex) * chartRowHeight
+            let rowBottom = rowTop + chartRowHeight - 4
             let baseline = NSBezierPath()
-            baseline.move(to: NSPoint(x: left, y: rowBottom))
-            baseline.line(to: NSPoint(x: left + plotWidth, y: rowBottom))
+            baseline.move(to: NSPoint(x: chartLeft, y: rowBottom))
+            baseline.line(to: NSPoint(x: chartLeft + plotWidth, y: rowBottom))
             NSColor.separatorColor.withAlphaComponent(0.45).setStroke()
             baseline.lineWidth = 0.5
             baseline.stroke()
@@ -178,7 +222,7 @@ final class NetworkHistoryView: NSView {
             let percentileIndex = max(0, Int(Double(max(0, successfulDurations.count - 1)) * 0.95))
             let p95 = successfulDurations.isEmpty ? 0.1 : successfulDurations[percentileIndex]
             let maxScale = max(0.1, p95 * 1.25)
-            let amplitude = max(3, rowHeight - 8)
+            let amplitude = max(3, chartRowHeight - 8)
             let path = NSBezierPath()
             var previousSucceeded = false
 
@@ -207,8 +251,28 @@ final class NetworkHistoryView: NSView {
             path.stroke()
         }
 
-        drawText("折线=HTTPS 总耗时   橙点=失败   红线=已确认换 IP",
-                 at: NSPoint(x: left, y: plotBottom + 3), font: noteFont, color: .secondaryLabelColor)
+        drawText("折线=总耗时   橙点=失败   红线=已确认换 IP",
+                 at: NSPoint(x: chartLeft, y: plotBottom + 3), font: noteFont, color: .secondaryLabelColor)
+        if let hoverIndex, points.indices.contains(hoverIndex) {
+            let selected = points[hoverIndex]
+            let guide = NSBezierPath()
+            let x = xPosition(hoverIndex)
+            guide.move(to: NSPoint(x: x, y: chartTop))
+            guide.line(to: NSPoint(x: x, y: plotBottom))
+            NSColor.labelColor.withAlphaComponent(0.45).setStroke()
+            guide.lineWidth = 0.8
+            guide.stroke()
+
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss"
+            let time = formatter.string(from: Date(timeIntervalSince1970: selected.timestamp))
+            let values = NetworkRoute.allCases.map { "\($0.title) \(durationText(selected, route: $0))" }.joined(separator: "  ")
+            drawText("\(time)  \(values)", at: NSPoint(x: 8, y: plotBottom + 18),
+                     font: noteFont, color: .labelColor)
+        } else {
+            drawText("鼠标移到曲线上查看每次延迟", at: NSPoint(x: 8, y: plotBottom + 18),
+                     font: noteFont, color: .tertiaryLabelColor)
+        }
     }
 }
 
@@ -779,32 +843,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(disabled("时区状态: \(timezoneDetail)"))
         }
         // 时间戳跟着系统时区走，而系统时区跟着出口走 —— 出口回到国内时它就是本地时间
-        let exitCC = readStatus(claudeStatusPath)["country"] ?? ""
+        let exitCC = cs["country"] ?? ""
         menu.addItem(disabled("\(exitCC == "CN" ? "本地时间" : "海外时间"): \(s["time"] ?? "—")"))
+        menu.addItem(.separator())
+
+        // 主菜单直接给出能否使用、风险档位和出口稳定性，不再要求用户自己从分数猜结论。
+        let riskLevel = cs["risklevel"] ?? (cs.isEmpty ? "尚未体检" : "未知")
+        let riskSymbol: String
+        switch riskLevel {
+        case "安全": riskSymbol = "🟢"
+        case "低风险": riskSymbol = "🟡"
+        case "中风险": riskSymbol = "🟠"
+        case "高风险": riskSymbol = "🔴"
+        case "极高风险": riskSymbol = "⛔️"
+        default: riskSymbol = "⚪️"
+        }
+        menu.addItem(plain("Claude 使用风险: \(riskSymbol) \(riskLevel)"))
+        let useConclusion: String
+        switch riskLevel {
+        case "安全": useConclusion = "可以安全使用 Claude ✓"
+        case "低风险": useConclusion = "可以使用，建议先完成剩余优化"
+        case "中风险": useConclusion = "谨慎使用，建议先修复风险项"
+        case "高风险": useConclusion = "不建议在当前环境使用 Claude"
+        case "极高风险": useConclusion = "请勿在当前环境登录或使用 Claude"
+        default: useConclusion = "完成一次体检后给出结论"
+        }
+        menu.addItem(disabled("使用结论: \(useConclusion)"))
+        let ipChanges = Int(cs["ipchanges"] ?? "") ?? 0
+        let stabilityLevel = ipChanges <= 1 ? "安全" : (ipChanges <= 5 ? "中风险" : "高风险")
+        menu.addItem(disabled("出口稳定性: \(stabilityLevel) · 24h \(ipChanges) 次变化"))
+        menu.addItem(disabled(ipChanges <= 1 ? "出口建议: 继续固定当前 IP，不要自动切换节点"
+                                             : "出口建议: 关闭负载均衡并固定单一出口 IP"))
         menu.addItem(.separator())
         menu.addItem(claudeMenuItem())
         // 体检和修复都放主菜单一级，不藏进子菜单(子菜单只放明细)
-        let c = readStatus(claudeStatusPath)
+        let c = cs
         if phase != nil {
             menu.addItem(disabled("正在检测…"))
         } else {
             menu.addItem(action("重新体检", #selector(runClaudeCheck)))
         }
-        // 始终摆在这儿: 按钮凭空消失会让人以为功能没了，置灰说明比隐藏清楚
+        // 有自动项时直接修；只有手动项时按钮仍可点击，运行后给出可执行步骤。
+        let gainRows = (c["gains"] ?? "").split(separator: "|").map(String.init)
         if c["fixable"] == "1", let list = c["fixlist"], !list.isEmpty {
             menu.addItem(action("⚡ 一键修复：\(list)", #selector(runClaudeFix)))
+        } else if !c.isEmpty, !gainRows.isEmpty {
+            menu.addItem(action("⚡ 一键修复 / 查看方案（\(gainRows.count) 项）", #selector(runClaudeFix)))
         } else if !c.isEmpty {
-            // score 只存在于 claudeMenuItem() 内部，这里自己从快照读
-            let sc = Int(c["score"] ?? "") ?? -1
-            menu.addItem(disabled(sc >= 100 ? "⚡ 一键修复（已满分，无需修复）"
-                                            : "⚡ 一键修复（剩余项需手动处理）"))
+            menu.addItem(disabled("⚡ 一键修复（已满分，无需修复）"))
         }
 
-        // 手动处理步骤常驻菜单: 修复弹窗是一次性的，关掉就找不回来了
-        let autoFixable = ["系统时区匹配出口", "DNS 出口", "代理形态"]
-        let manual = (c["gains"] ?? "").split(separator: "|").map(String.init).compactMap { g -> [String]? in
+        // 手动处理步骤只排除当前确实能自动处理的项，不再把“代理形态/DNS”一概隐藏。
+        let fixList = c["fixlist"] ?? ""
+        let actualAutoFixable: Set<String> = [
+            fixList.contains("时区") ? "系统时区匹配出口" : "",
+            fixList.contains("DNS") ? "DNS 出口" : "",
+            fixList.contains("PAC") ? "代理形态" : "",
+        ]
+        let manual = gainRows.compactMap { g -> [String]? in
             let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
-            guard f.count >= 3, !autoFixable.contains(f[0]) else { return nil }
+            guard f.count >= 3, !actualAutoFixable.contains(f[0]) else { return nil }
             return f
         }
         if !manual.isEmpty {
@@ -865,7 +963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func networkHistoryMenuItem(_ history: [NetworkHistoryPoint]) -> NSMenuItem {
         let recent = Array(history.suffix(60))
-        let title = history.isEmpty ? "HTTPS/TCP 线路质量（暂无数据）" : "HTTPS/TCP 线路质量（最近 \(recent.count) 次）"
+        let title = history.isEmpty ? "线路质量（暂无数据）" : "线路质量（最近 \(recent.count) 次）"
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
 
@@ -875,7 +973,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         submenu.addItem(.separator())
 
         if history.isEmpty {
-            submenu.addItem(disabled("24 小时内暂无 HTTPS/TCP 检测记录"))
+            submenu.addItem(disabled("24 小时内暂无线路检测记录"))
         } else {
             let changes = history.filter(\.ipChanged).count
             submenu.addItem(disabled("24 小时统计: \(history.count) 次检测 · 确认换 IP \(changes) 次"))
@@ -1045,17 +1143,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let probeState = readStatus(claudeProbeStatePath)
         let score = Int(c["score"] ?? "") ?? -1
         let grade = c["grade"] ?? ""
+        let riskLevel = c["risklevel"] ?? grade
         let exitConsistent = c["consistent"] == "1"
-        // 颜色必须和最终评级一致，不能再出现“🟢 85 分 · 风险”。
-        // 只有 90+、评级优秀且三路出口一致才是绿色；确认风险直接红色。
-        let isSafe = score >= 90 && grade == "优秀" && exitConsistent
-        let isWarning = !isSafe && score >= 70 && grade == "有风险" && exitConsistent
-        let dot = score < 0 ? "⚪️" : (isSafe ? "🟢" : (isWarning ? "🟠" : "🔴"))
+        let isSafe = c["safeuse"] == "1" && exitConsistent
+        let isWarning = riskLevel == "低风险" || riskLevel == "中风险"
+        let dot: String
+        switch riskLevel {
+        case "安全": dot = "🟢"
+        case "低风险": dot = "🟡"
+        case "中风险": dot = "🟠"
+        case "高风险", "极高风险": dot = "🔴"
+        default: dot = score < 0 ? "⚪️" : "🟠"
+        }
         let riskColor: NSColor = isSafe ? .labelColor : (isWarning ? .systemOrange : .systemRed)
         // 提分详情在子菜单顶部，标题只报状态，不啰嗦
         let verifying = probeState["state"] == "verifying"
         let title = score < 0 ? "Claude 环境体检"
-            : "Claude 环境 \(dot) \(score) 分 · \(verifying ? "复核中" : grade)"
+            : "Claude 环境 \(dot) \(score) 分 · \(verifying ? "复核中" : riskLevel)"
         let unfit = score >= 0 && !isSafe
         let alertColor: NSColor = score < 0 ? .labelColor : riskColor
 
@@ -1091,7 +1195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let canFix = c["fixable"] == "1" && fixableNames.contains(f[0])
                     let mark = canFix ? "⚡" : "＋\(f[1])"
                     sub.addItem(colored("   \(mark)  \(f[0])：\(f[2])", .labelColor,
-                                        canFix ? #selector(runClaudeFix) : nil))
+                                        #selector(runClaudeFix)))
                 }
             }
             // 26 项信号，按六组展示: 分组~标签~权重~得分~值
@@ -1835,7 +1939,7 @@ final class BrowserBridge {
             content.replaceChildren();
             const score=Number(c.score||0), safe=score>=90&&c.grade==="优秀"&&c.consistent==="1";
             const summary=element("div","summary");
-            [[score+" / 100","环境得分"],[txt(c.grade),"安全等级"],[txt(c.country),"出口国家"],[c.consistent==="1"?"三路一致":"三路不一致","出口状态"]].forEach(x=>{const m=element("div","metric");m.append(element("b","",x[0]),element("span","",x[1]));summary.append(m);});
+            [[score+" / 100","环境得分"],[txt(c.risklevel||c.grade),"使用风险"],[txt(c.country),"出口国家"],[c.consistent==="1"?"三路一致":"三路不一致","出口状态"]].forEach(x=>{const m=element("div","metric");m.append(element("b","",x[0]),element("span","",x[1]));summary.append(m);});
             content.append(summary,element("div","verdict "+(safe?"good":score>=70?"warn":"bad"),txt(c.verdict)));
 
             const matrixSection=element("section"); matrixSection.append(element("h2","","信号一致性矩阵"),element("p","desc","比单项数量更重要的是出口、系统和浏览器彼此是否自洽。")); const matrixHost=element("div","matrix"); matrixSection.append(matrixHost); content.append(matrixSection);
@@ -1847,6 +1951,7 @@ final class BrowserBridge {
             matrix(matrixHost,"HTTP/JS 浏览器画像",c.brheaders==="ok"?"good":c.brheaders==="conflict"?"bad":"neutral",txt(c.brheaders));
             matrix(matrixHost,"DNS 解析",/^(正常|代理接管)/.test(c.dnsresult||"")?"good":/污染|失败/.test(c.dnsresult||"")?"bad":"warn",txt(c.dnsresult)+" · "+txt(c.dnsanswer));
             matrix(matrixHost,"shell ↔ 浏览器连通性",b.reach_api==="ok"&&c.api&&c.api!=="000"?"good":b.reach_api&&b.reach_api!=="ok"?"bad":"neutral","API shell HTTP "+txt(c.api)+" · 浏览器 "+txt(b.reach_api));
+            const changes=Number(c.ipchanges||0); matrix(matrixHost,"出口 IP 稳定性",changes<=1?"good":changes<=5?"warn":"bad","24 小时内确认变化 "+changes+" 次 · "+(changes<=1?"建议继续固定当前出口":"请关闭自动切换并固定单一出口"));
 
             let rows=section("出口与 IP","真实系统探测，不依赖单一浏览器接口。");
             addRow(rows,"权威出口 IP",n.timezone_ip||n.gfw||c.ip,true); addRow(rows,"国内视角",n.cn,true); addRow(rows,"国外视角",n.intl,true); addRow(rows,"谷歌侧",n.gfw,true);
@@ -1870,7 +1975,7 @@ final class BrowserBridge {
             addRow(rows,"Network Information",txt(b.connection_type)+" · RTT "+txt(b.connection_rtt,"—")+"ms · 下行 "+txt(b.connection_downlink,"—")+"Mbps · 省流 "+txt(b.connection_save_data));
             addRow(rows,"WebGL Vendor",b.webgl_vendor); addRow(rows,"WebGL Renderer",b.webgl_renderer); addRow(rows,"Canvas Hash",b.canvas,true); addRow(rows,"中文字体",txt(b.fonts,"无")); addRow(rows,"厂商字体",txt(b.fonts_vendor,"无"));
 
-            rows=section("HTTPS/TCP 线路质量","最近 24 小时成功率与本次 TCP、TLS、TTFB、总耗时。");
+            rows=section("线路质量","最近 24 小时成功率与本次 TCP、TLS、TTFB、总耗时。");
             [["cn","国内"],["intl","国外"],["gfw","谷歌侧"],["google","Google 204"]].forEach(([key,label])=>{const v=q[key]||{};addRow(rows,label,txt(v.successRate,"0")+"% 成功 · 失败 "+txt(v.failures,"0")+" · TCP "+duration(v.connect)+" · TLS "+duration(v.tls)+" · TTFB "+duration(v.ttfb)+" · 总耗时 "+duration(v.total)+" · 抖动 "+duration(v.jitter)+" · HTTP "+txt(v.http));});
 
             const signals=parseSignals(c.signals); const signalSection=element("section"); signalSection.append(element("h2","","26 项加权评分明细"),element("p","desc","新增浏览器诊断只作为证据展示；安全档位仍由经过测试的 100 分模型决定。")); const table=element("table","signal-table"); const head=element("tr");["分组","检测项","证据","得分"].forEach(v=>head.append(element("th","",v))); const thead=element("thead");thead.append(head);const tbody=element("tbody");signals.forEach(s=>{const tr=element("tr");tr.append(element("td","",s.group),element("td","",s.label),element("td","",s.value),element("td",s.points===s.weight?"full":"miss",s.points+" / "+s.weight));tbody.append(tr);});table.append(thead,tbody);signalSection.append(table);content.append(signalSection);
