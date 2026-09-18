@@ -149,7 +149,7 @@ check "localhost Bridge 往返" "$(grep -c 'bridge integration passed' "$TMP_DIR
 
 printf '%s\n' '② 完整报告关键分组齐全'
 for title in '信号一致性矩阵' '出口与 IP' '时区、区域与语言' 'WebRTC 与泄漏面' 'DNS' \
-             'Claude 连通性' '浏览器、设备与运行容器' 'HTTPS/TCP 线路质量' \
+             'Claude 连通性' '浏览器、设备与运行容器' '线路质量' \
              '26 项加权评分明细' '支付与账号地区（人工核对）'; do
   check "包含 $title" "$([[ $(grep -c "$title" "$TMP_DIR/report.html" || true) -ge 1 ]] && echo yes)" yes
 done
@@ -165,6 +165,11 @@ check "提供保持打开按钮" "$(grep -c '保持打开' "$TMP_DIR/report.html
 check "不再保留旧的 10 秒倒计时" "$(grep -c '10 秒后自动关闭\|本页将在 10 秒' "$TMP_DIR/report.html" || true)" 0
 check "时区匹配行使用原生选中态颜色" "$([[ $(grep -c 'plain("系统时区:' "$ROOT/menubar/StatusApp.swift" || true) -ge 2 ]] && echo yes)" yes
 check "时区匹配行不再硬编码绿色" "$(grep -c 'colored("系统时区:.*systemGreen' "$ROOT/menubar/StatusApp.swift" || true)" 0
+check "线路质量标题不再带 HTTPS/TCP 前缀" "$(grep -c 'HTTPS/TCP 线路质量' "$ROOT/menubar/StatusApp.swift" || true)" 0
+check "波动图支持鼠标移动取样" "$(grep -c 'override func mouseMoved' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "波动图提示悬停查看延迟" "$(grep -c '鼠标移到曲线上查看每次延迟' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "主菜单展示 Claude 风险档位" "$(grep -c 'Claude 使用风险:' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "手动项仍可点击查看修复方案" "$(grep -c '一键修复 / 查看方案' "$ROOT/menubar/StatusApp.swift" || true)" 1
 
 printf '\n'
 if [[ $FAIL -eq 0 ]]; then
