@@ -276,8 +276,32 @@ final class NetworkHistoryView: NSView {
     }
 }
 
+// 更新按钮使用自绘强调色背景，避免非激活浮层里的原生圆角按钮被 AppKit 灰化，
+// 同时保留按下即反馈和系统强调色/明暗模式适配。
+final class AccentActionButton: NSButton {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        super.updateLayer()
+        wantsLayer = true
+        let base = NSColor.controlAccentColor
+        let fill = isEnabled
+            ? (isHighlighted ? (base.blended(withFraction: 0.16, of: .black) ?? base) : base)
+            : NSColor.disabledControlTextColor.withAlphaComponent(0.25)
+        layer?.backgroundColor = fill.cgColor
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        needsDisplay = true
+        needsLayout = true
+    }
+}
+
 // 非模态新版提示：不抢走当前窗口焦点，用户可直接在线更新并自动重启。
-// 视觉层级参考桌面软件常见的右下角更新卡片，但保持 macOS 原生材质和控件行为。
+// 视觉层级参考桌面软件常见的右上角更新卡片，但保持 macOS 原生材质和控件行为。
 final class UpdateToastController: NSObject {
     private var panel: NSPanel!
     private let onUpgrade: () -> Void
@@ -289,7 +313,7 @@ final class UpdateToastController: NSObject {
         self.onDismiss = onDismiss
         super.init()
 
-        let size = NSSize(width: 360, height: 112)
+        let size = NSSize(width: 380, height: 138)
         let p = NSPanel(contentRect: NSRect(origin: .zero, size: size),
                         styleMask: [.borderless, .nonactivatingPanel],
                         backing: .buffered, defer: false)
@@ -309,73 +333,101 @@ final class UpdateToastController: NSObject {
         root.blendingMode = .behindWindow
         root.state = .active
         root.wantsLayer = true
-        root.layer?.cornerRadius = 14
-        root.layer?.borderWidth = 1
-        root.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.65).cgColor
+        root.layer?.cornerRadius = 18
+        root.layer?.cornerCurve = .continuous
+        root.layer?.borderWidth = 0.75
+        root.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
         root.setAccessibilityElement(true)
         root.setAccessibilityRole(.group)
-        root.setAccessibilityLabel("发现 CheckClaude 新版本 v\(latest)")
+        root.setAccessibilityLabel("CheckClaude v\(latest) 可用。当前 v\(current)，安装完成后自动重启。")
         p.contentView = root
+
+        let accent = NSColor.controlAccentColor
+        let badge = NSView()
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        badge.wantsLayer = true
+        badge.layer?.cornerRadius = 20
+        badge.layer?.cornerCurve = .continuous
+        badge.layer?.backgroundColor = accent.withAlphaComponent(0.14).cgColor
 
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.image = NSImage(systemSymbolName: "arrow.up.circle.fill",
-                             accessibilityDescription: "发现新版本")
-        icon.contentTintColor = .systemGreen
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 23, weight: .medium)
+        icon.image = NSImage(systemSymbolName: "arrow.down",
+                             accessibilityDescription: "下载新版本")
+        icon.contentTintColor = accent
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 18, weight: .bold)
+        badge.addSubview(icon)
 
-        let title = NSTextField(labelWithString: "发现新版本 v\(latest)")
+        let title = NSTextField(labelWithString: "CheckClaude v\(latest) 可用")
         title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        title.font = .systemFont(ofSize: 15.5, weight: .semibold)
         title.textColor = .labelColor
+        title.lineBreakMode = .byTruncatingTail
 
-        let body = NSTextField(wrappingLabelWithString:
-            "当前 v\(current)，在线安装后自动重启。")
+        let version = NSTextField(labelWithString: "v\(current)  →  v\(latest)")
+        version.translatesAutoresizingMaskIntoConstraints = false
+        version.font = .monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
+        version.textColor = accent
+
+        let body = NSTextField(labelWithString: "安全下载并替换应用，完成后自动重启；检测数据会保留。")
         body.translatesAutoresizingMaskIntoConstraints = false
         body.font = .systemFont(ofSize: 12)
         body.textColor = .secondaryLabelColor
-        body.maximumNumberOfLines = 2
+        body.lineBreakMode = .byTruncatingTail
 
-        let update = NSButton(title: "立即更新", target: self, action: #selector(upgradeNow))
+        let later = NSButton(title: "稍后", target: self, action: #selector(closeToast))
+        later.translatesAutoresizingMaskIntoConstraints = false
+        later.isBordered = false
+        later.font = .systemFont(ofSize: 12.5, weight: .medium)
+        later.contentTintColor = .secondaryLabelColor
+        later.setAccessibilityLabel("稍后提醒")
+
+        let update = AccentActionButton(title: "更新并重启", target: self, action: #selector(upgradeNow))
         update.translatesAutoresizingMaskIntoConstraints = false
-        update.bezelStyle = .rounded
-        update.controlSize = .small
-        update.contentTintColor = .systemGreen
+        update.isBordered = false
+        update.controlSize = .regular
+        update.font = .systemFont(ofSize: 13, weight: .semibold)
+        update.contentTintColor = .white
+        update.attributedTitle = NSAttributedString(string: "更新并重启", attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ])
+        update.wantsLayer = true
         update.keyEquivalent = "\r"
-        update.setAccessibilityLabel("立即更新到 v\(latest) 并重启 CheckClaude")
+        update.setAccessibilityLabel("更新到 v\(latest) 并重启 CheckClaude")
 
-        let close = NSButton(image: NSImage(systemSymbolName: "xmark",
-                                             accessibilityDescription: "关闭")!,
-                             target: self, action: #selector(closeToast))
-        close.translatesAutoresizingMaskIntoConstraints = false
-        close.isBordered = false
-        close.contentTintColor = .secondaryLabelColor
-        close.setAccessibilityLabel("稍后提醒")
-
-        [icon, title, body, update, close].forEach(root.addSubview)
+        [badge, title, version, body, later, update].forEach(root.addSubview)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
-            icon.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
-            icon.widthAnchor.constraint(equalToConstant: 26),
-            icon.heightAnchor.constraint(equalToConstant: 26),
+            badge.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 18),
+            badge.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
+            badge.widthAnchor.constraint(equalToConstant: 40),
+            badge.heightAnchor.constraint(equalToConstant: 40),
 
-            close.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11),
-            close.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
-            close.widthAnchor.constraint(equalToConstant: 20),
-            close.heightAnchor.constraint(equalToConstant: 20),
+            icon.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            icon.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 22),
+            icon.heightAnchor.constraint(equalToConstant: 22),
 
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -10),
-            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 15),
+            title.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 13),
+            title.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            title.topAnchor.constraint(equalTo: root.topAnchor, constant: 17),
+
+            version.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            version.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
 
             body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
-            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -18),
+            body.topAnchor.constraint(equalTo: version.bottomAnchor, constant: 5),
 
-            update.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            update.topAnchor.constraint(greaterThanOrEqualTo: body.bottomAnchor, constant: 7),
-            update.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            update.widthAnchor.constraint(greaterThanOrEqualToConstant: 88)
+            update.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+            update.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -13),
+            update.widthAnchor.constraint(equalToConstant: 112),
+            update.heightAnchor.constraint(equalToConstant: 32),
+
+            later.trailingAnchor.constraint(equalTo: update.leadingAnchor, constant: -8),
+            later.centerYAnchor.constraint(equalTo: update.centerYAnchor),
+            later.widthAnchor.constraint(equalToConstant: 48),
+            later.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
 
@@ -383,14 +435,15 @@ final class UpdateToastController: NSObject {
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
                 ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
-        // macOS 通知习惯位于右上角：贴近菜单栏下方，同时避开安全区域。
-        let finalOrigin = NSPoint(x: visible.maxX - panel.frame.width - 22,
+        let finalOrigin = NSPoint(x: visible.maxX - panel.frame.width - 20,
                                   y: visible.maxY - panel.frame.height - 14)
-        panel.setFrameOrigin(NSPoint(x: finalOrigin.x, y: finalOrigin.y + 14))
-        panel.alphaValue = 0
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        panel.setFrameOrigin(reduceMotion ? finalOrigin : NSPoint(x: finalOrigin.x + 18, y: finalOrigin.y + 6))
+        panel.alphaValue = reduceMotion ? 1 : 0
         panel.orderFrontRegardless()
+        guard !reduceMotion else { return }
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.24
+            context.duration = 0.26
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             panel.animator().alphaValue = 1
             panel.animator().setFrameOrigin(finalOrigin)
@@ -399,10 +452,18 @@ final class UpdateToastController: NSObject {
 
     func dismiss() {
         guard panel.isVisible else { onDismiss(); return }
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard !reduceMotion else {
+            panel.orderOut(nil)
+            onDismiss()
+            return
+        }
+        let origin = panel.frame.origin
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
             panel.animator().alphaValue = 0
+            panel.animator().setFrameOrigin(NSPoint(x: origin.x + 8, y: origin.y))
         }, completionHandler: { [weak self] in
             guard let self else { return }
             self.panel.orderOut(nil)
@@ -772,9 +833,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btn.contentTintColor = nil                          // 文字保持系统默认色，与其它菜单栏文字一致
             let hasUpd = readStatus(updatePath)["hasupdate"] == "1"
             if let up = upgradeState {
-                btn.title = " 升级 \(up)"
+                btn.title = " 升级 \(up)  ›"
             } else {
-                btn.title = (city.isEmpty ? "" : " \(city)") + (hasUpd ? " ⬆" : "")
+                let location = city.isEmpty ? " CheckClaude" : " \(city)"
+                btn.title = location + (hasUpd ? " ⬆" : "") + "  ›"
             }
         }
 

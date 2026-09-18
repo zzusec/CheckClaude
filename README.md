@@ -25,6 +25,13 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.10（2026-09-18）
+
+- 重做新版提示卡片：采用更紧凑的 macOS 原生层级、连续圆角、强调色图标、清晰版本迁移信息和“更新并重启 / 稍后”双操作。
+- 主操作按钮改为自绘系统强调色背景，解决非激活浮层中按钮看起来像灰色禁用状态的问题，并保留按下反馈、明暗模式和减少动态效果适配。
+- 更新提示从右侧轻柔滑入；开启“减少动态效果”时直接显示，不执行位移动画。
+- 菜单栏城市文字右侧增加轻量 `›` 提示，明确该状态项可以点击展开；有更新时保留 `⬆` 标记。
+
 ### v4.9（2026-09-18）
 
 - 删除主菜单中重复的“Claude 使用风险 / 使用结论 / 出口稳定性 / 出口建议”四行摘要，减少菜单高度和信息重复。
