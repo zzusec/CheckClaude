@@ -25,6 +25,11 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.9（2026-09-18）
+
+- 删除主菜单中重复的“Claude 使用风险 / 使用结论 / 出口稳定性 / 出口建议”四行摘要，减少菜单高度和信息重复。
+- 风险档位仍保留在唯一的“Claude 环境 · 分数 · 风险级别”入口中，展开后继续提供完整结论、稳定性证据、问题和修复方案。
+
 ### v4.8（2026-09-18）
 
 - 主菜单新增明确的 Claude 使用风险档位：安全、低风险、中风险、高风险、极高风险，并直接显示“可以安全使用 / 建议优化 / 不建议使用”等结论。

@@ -168,7 +168,10 @@ check "时区匹配行不再硬编码绿色" "$(grep -c 'colored("系统时区:.
 check "线路质量标题不再带 HTTPS/TCP 前缀" "$(grep -c 'HTTPS/TCP 线路质量' "$ROOT/menubar/StatusApp.swift" || true)" 0
 check "波动图支持鼠标移动取样" "$(grep -c 'override func mouseMoved' "$ROOT/menubar/StatusApp.swift" || true)" 1
 check "波动图提示悬停查看延迟" "$(grep -c '鼠标移到曲线上查看每次延迟' "$ROOT/menubar/StatusApp.swift" || true)" 1
-check "主菜单展示 Claude 风险档位" "$(grep -c 'Claude 使用风险:' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "主菜单不再重复展示风险摘要" "$(grep -c 'Claude 使用风险:' "$ROOT/menubar/StatusApp.swift" || true)" 0
+check "主菜单不再重复展示使用结论" "$(grep -c '使用结论:' "$ROOT/menubar/StatusApp.swift" || true)" 0
+check "主菜单不再重复展示出口建议" "$(grep -c '出口建议:' "$ROOT/menubar/StatusApp.swift" || true)" 0
+check "Claude 环境项继续使用风险档位" "$([[ $(grep -c 'let riskLevel = c\["risklevel"\]' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
 check "手动项仍可点击查看修复方案" "$(grep -c '一键修复 / 查看方案' "$ROOT/menubar/StatusApp.swift" || true)" 1
 
 printf '\n'
