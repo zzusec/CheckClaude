@@ -847,33 +847,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("\(exitCC == "CN" ? "本地时间" : "海外时间"): \(s["time"] ?? "—")"))
         menu.addItem(.separator())
 
-        // 主菜单直接给出能否使用、风险档位和出口稳定性，不再要求用户自己从分数猜结论。
-        let riskLevel = cs["risklevel"] ?? (cs.isEmpty ? "尚未体检" : "未知")
-        let riskSymbol: String
-        switch riskLevel {
-        case "安全": riskSymbol = "🟢"
-        case "低风险": riskSymbol = "🟡"
-        case "中风险": riskSymbol = "🟠"
-        case "高风险": riskSymbol = "🔴"
-        case "极高风险": riskSymbol = "⛔️"
-        default: riskSymbol = "⚪️"
-        }
-        menu.addItem(plain("Claude 使用风险: \(riskSymbol) \(riskLevel)"))
-        let useConclusion: String
-        switch riskLevel {
-        case "安全": useConclusion = "可以安全使用 Claude ✓"
-        case "低风险": useConclusion = "可以使用，建议先完成剩余优化"
-        case "中风险": useConclusion = "谨慎使用，建议先修复风险项"
-        case "高风险": useConclusion = "不建议在当前环境使用 Claude"
-        case "极高风险": useConclusion = "请勿在当前环境登录或使用 Claude"
-        default: useConclusion = "完成一次体检后给出结论"
-        }
-        menu.addItem(disabled("使用结论: \(useConclusion)"))
-        let ipChanges = Int(cs["ipchanges"] ?? "") ?? 0
-        let stabilityLevel = ipChanges <= 1 ? "安全" : (ipChanges <= 5 ? "中风险" : "高风险")
-        menu.addItem(disabled("出口稳定性: \(stabilityLevel) · 24h \(ipChanges) 次变化"))
-        menu.addItem(disabled(ipChanges <= 1 ? "出口建议: 继续固定当前 IP，不要自动切换节点"
-                                             : "出口建议: 关闭负载均衡并固定单一出口 IP"))
         menu.addItem(.separator())
         menu.addItem(claudeMenuItem())
         // 体检和修复都放主菜单一级，不藏进子菜单(子菜单只放明细)
