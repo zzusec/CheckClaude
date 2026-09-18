@@ -173,6 +173,9 @@ check "主菜单不再重复展示使用结论" "$(grep -c '使用结论:' "$ROO
 check "主菜单不再重复展示出口建议" "$(grep -c '出口建议:' "$ROOT/menubar/StatusApp.swift" || true)" 0
 check "Claude 环境项继续使用风险档位" "$([[ $(grep -c 'let riskLevel = c\["risklevel"\]' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
 check "手动项仍可点击查看修复方案" "$(grep -c '一键修复 / 查看方案' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "更新提示使用强调色主按钮" "$(grep -c 'AccentActionButton(title: "更新并重启"' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "更新提示支持减少动态效果" "$(grep -c 'accessibilityDisplayShouldReduceMotion' "$ROOT/menubar/StatusApp.swift" || true)" 2
+check "菜单栏标题右侧包含展开箭头" "$([[ $(grep -c '\+ "  ›"' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
 
 printf '\n'
 if [[ $FAIL -eq 0 ]]; then
