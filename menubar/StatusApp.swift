@@ -332,7 +332,8 @@ final class UpdateToastController: NSObject {
         panel = p
 
         let root = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        root.material = .popover
+        // .menu 比 .popover 中性，不会在浅色壁纸上泛蓝
+        root.material = .menu
         root.blendingMode = .behindWindow
         root.state = .active
         root.wantsLayer = true
@@ -372,7 +373,7 @@ final class UpdateToastController: NSObject {
         version.font = .monospacedDigitSystemFont(ofSize: 12.5, weight: .medium)
         version.textColor = accent
 
-        let body = NSTextField(labelWithString: "安全下载并替换应用，完成后自动重启；检测数据会保留。")
+        let body = NSTextField(labelWithString: "下载替换后自动重启，检测数据保留")
         body.translatesAutoresizingMaskIntoConstraints = false
         body.font = .systemFont(ofSize: 12)
         body.textColor = .secondaryLabelColor
@@ -1247,7 +1248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let gains = (c["gains"] ?? "").split(separator: "|").map(String.init)
             sub.addItem(.separator())
             if gains.isEmpty {
-                sub.addItem(colored("🎉 已满分，没有可提升项", .labelColor))
+                sub.addItem(colored("🎉 已满分", .labelColor))
             } else {
                 sub.addItem(colored("还能提 \(100 - score) 分", .labelColor))
                 let fixableNames = ["系统时区匹配出口", "DNS 出口", "代理形态"]
@@ -1310,16 +1311,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             default: headerState = "未采集"
             }
             sub.addItem(disabled("浏览器请求头: \(headerState) · Sec-Fetch \(c["brfetch"] ?? "?")"))
-            let issues = (c["issues"] ?? "").split(separator: "|").map(String.init)
-            let fixes = (c["fixes"] ?? "").split(separator: "|").map(String.init)
-            if !issues.isEmpty {
-                sub.addItem(.separator())
-                issues.forEach { sub.addItem(unfit ? colored("⚠️  \($0)", riskColor) : disabled("⚠️  \($0)")) }
-            }
-            if !fixes.isEmpty {
-                sub.addItem(.separator())
-                fixes.forEach { sub.addItem(disabled("→  \($0)")) }
-            }
+            // issues/fixes 两段与顶部提分清单、「手动处理步骤」子菜单重复，
+            // 还是弹窗里最长的行 —— 删掉，宽度和高度一起降下来
             sub.addItem(.separator())
             sub.addItem(disabled("体检时间: \(c["time"] ?? "—")"))
         }
@@ -1328,7 +1321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sub.addItem(action("把系统区域改为 \(cc)", #selector(runClaudeFixLocale)))
         }
         if c["needsudo"] == "1" {
-            sub.addItem(disabled("⚠️ 部分修复需授权：sudo bash enable-auto-timezone.sh"))
+            sub.addItem(disabled("⚠️ 部分修复需 sudo 授权"))
         }
 
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")

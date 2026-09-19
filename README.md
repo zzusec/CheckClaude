@@ -25,6 +25,12 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.15（2026-09-19）
+
+- 体检弹窗收窄：提分建议一律压到一句话，完整步骤只留在「手动处理步骤」子菜单；删掉与提分清单重复的问题/建议两段。
+- 渲染环境只显示 GPU 型号，不再把整串 WebGL 描述截断成半截括号。
+- 更新提示改用中性材质，文案精简。
+
 ### v4.14（2026-09-18）
 
 - Codex 防降智菜单精简为一行状态：去掉开关项和注入计数，没装 codex 或走第三方中转时整行不显示。
