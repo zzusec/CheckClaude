@@ -25,6 +25,12 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.13（2026-09-18）
+
+- 新增 **Codex 防降智**（默认开启）：本机反代 `chatgpt.com/backend-api`，采集并跨会话复用 `x-codex-turn-state`，让新会话不必每次从冷状态起步。思路参考 [tzf1003/csss](https://github.com/tzf1003/csss)，但不需要 Surge、不装证书、不改系统代理。
+- 菜单栏可随时开关；只在 codex 走官方 ChatGPT 登录时接入，走第三方中转时自动跳过。
+- 关闭或卸载会还原 `~/.codex/config.toml`，备份留在 `config.toml.checkclaude-backup`。
+
 ### v4.10（2026-09-18）
 
 - 重做新版提示卡片：采用更紧凑的 macOS 原生层级、连续圆角、强调色图标、清晰版本迁移信息和“更新并重启 / 稍后”双操作。
@@ -122,7 +128,9 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 |---|---|
 | `auto-timezone.sh` | 引擎：三路检测 + 解析谷歌侧 IP 时区 + 自动改时区 + 变化告警 |
 | `claude-check.sh` | Claude 运行环境体检：26 项加权信号打分 + 问题清单 + 修复建议 + 自动修复 |
-| `test-claude-check.sh` / `test-auto-timezone.sh` / `test-browser-report.sh` / `test-upgrade.sh` | macOS 评分、网络波动、完整报告页和更新流程自测（不联网） |
+| `test-claude-check.sh` / `test-auto-timezone.sh` / `test-browser-report.sh` / `test-upgrade.sh` / `test-codex-guard.sh` | macOS 评分、网络波动、完整报告页和更新流程自测（不联网） |
+| `codex-guard.sh` | Codex 防降智：接入/断开本机反代，改写并还原 `~/.codex/config.toml` |
+| `menubar/CodexGuard.swift` | 本机反代：采集、校验、缓存并注入 `x-codex-turn-state`，到期自动续 |
 | `upgrade.sh` | 检查 GitHub Releases 新版本 + 一键升级；发现新版主动显示右下角提示，点击后在线安装并自动重启 |
 | `windows/Program.cs` | Windows 版托盘、检测、修复和升级主逻辑 |
 | `windows/BrowserBridge.cs` | Windows 真实浏览器指纹本地桥接 |
@@ -243,6 +251,27 @@ sudo bash enable-auto-timezone.sh   # 给 systemsetup / networksetup 开 NOPASSW
 
 自测均不联网：`bash test-claude-check.sh`、`bash test-auto-timezone.sh`、`bash test-browser-report.sh`、`bash test-upgrade.sh`
 
+## Codex 防降智
+
+Codex 的每次请求都带 `x-codex-turn-state`，表示这一轮从哪个状态续上。新会话没有它，等于每次都从冷状态开始。
+CheckClaude 起一个只监听 `127.0.0.1` 的反代，把仍在有效期内的 state 跨会话复用：
+
+```
+codex ──► 127.0.0.1:8788/backend-api ──► chatgpt.com/backend-api
+             采集 / 校验 / 注入 state
+```
+
+- **默认开启**，菜单栏「🛡 Codex 防降智」随时可关；手动关过之后不会再自动接入。
+- 只在 codex 走官方 ChatGPT 登录时接入；`model_provider` 指向第三方中转时自动跳过（注入对上游没有意义）。
+- 接入方式是在 `~/.codex/config.toml` 顶部写 `chatgpt_base_url`，原文件备份为 `config.toml.checkclaude-backup`，关闭 / 卸载时逐行还原。
+- state 只校验结构（`0x80` 开头、10 块、签发时间在有效期内），不合格不缓存；只留在反代进程内存里，落盘的只有指纹和计数。
+- 反代由 LaunchAgent 常驻，App 退出或崩溃都不影响 codex 正常使用；起不来会自动回滚配置。
+- 缓存快过期时用上一次请求的凭据补一针探针续期，失败进冷却，不重放真实请求。
+
+这只能保持请求参数一致，**不保证模型质量、账号额度或服务端路由**。292/10 块是经验规则，不是官方公布的指标。
+
+自测：`bash test-codex-guard.sh`（本机假上游，不联网、不碰真实 codex 配置）
+
 ## 告警
 
 - 出口 IP 连续两次确认发生变化 → 通知「出口 IP 变化 A → B」。
@@ -330,5 +359,7 @@ bash ~/CheckClaude/uninstall.sh
 ---
 
 ## 致谢
+
+- [tzf1003/csss](https://github.com/tzf1003/csss)：Codex turn-state 复用思路的来源（Surge 脚本实现），本项目是不依赖代理软件的独立实现。
 
 感谢 [linux.do](https://linux.do/) —— 一个充满活力的技术社区，本项目也在这里分享和交流。
