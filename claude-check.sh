@@ -175,6 +175,7 @@ ip_country_code() {
 
 parse_net() {
   COUNTRY=""; COUNTRY_NAME=""; CITY=""; ISP=""; ASN=""; HOSTING=-1; PROXY=0
+  ASN_NUM=""; ASN_NUM2=""; ASN_MATCH=-1
   if [[ -s "$TMP/ipapi" ]] && grep -q '"status":"success"' "$TMP/ipapi"; then
     COUNTRY=$(jget "$TMP/ipapi" countryCode); COUNTRY_NAME=$(jget "$TMP/ipapi" country)
     CITY=$(jget "$TMP/ipapi" city); ISP=$(jget "$TMP/ipapi" isp); ASN=$(jget "$TMP/ipapi" as)
@@ -202,6 +203,16 @@ parse_net() {
     INTEL_SOURCES+="${INTEL_SOURCES:+,}${name}:${cc}"
     INTEL_COUNTRIES+="${INTEL_COUNTRIES:+ }${cc}"
   done
+  # ASN 交叉比对: 国家码一致不等于归属一致。同一个 IP 在 ip-api 报 AS5065 住宅 ISP、
+  # 在 ipinfo 报 AS3257 GTT(骨干/IDC)，说明这段 IP 的归属登记本身有分歧 ——
+  # 风控侧按哪一家判都有可能，只比国家码会把这种 IP 当成干净住宅放过去。
+  ASN_NUM=$(printf '%s' "$ASN"  | grep -Eo '^AS[0-9]+' || true)
+  ASN_NUM2=$(printf '%s' "$ISP2" | grep -Eo '^AS[0-9]+' || true)
+  if [[ -n "$ASN_NUM" && -n "$ASN_NUM2" ]]; then
+    ASN_MATCH=$([[ "$ASN_NUM" == "$ASN_NUM2" ]] && echo 1 || echo 0)
+  else
+    ASN_MATCH=-1
+  fi
   if [[ -z "$COUNTRY" ]]; then
     if [[ -n "$COUNTRY2" ]]; then COUNTRY="$COUNTRY2"; COUNTRY_NAME="$COUNTRY2"; ISP="$ISP2"
     elif [[ -n "$COUNTRY3" ]]; then COUNTRY="$COUNTRY3"; COUNTRY_NAME="$COUNTRY3"; ISP="$ISP3"
@@ -317,7 +328,7 @@ parse_browser() {
   BR_RTC_MS=""; BR_RTC_ERROR=""
   BR_SOURCE=""; BR_UA=""; BR_UA_JS=""; BR_CH_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""
   BR_UAD_PLAT=""; BR_UAD_BRANDS=""; BR_SF_SITE=""; BR_SF_MODE=""; BR_SF_DEST=""
-  BR_REACH_CLAUDE=""; BR_REACH_CLAUDE_MS=""; BR_REACH_ANTHROPIC=""; BR_REACH_ANTHROPIC_MS=""
+  BR_REACH_ANTHROPIC=""; BR_REACH_ANTHROPIC_MS=""
   BR_REACH_API=""; BR_REACH_API_MS=""
   BR_FONTS=""; BR_WEBGL=""; BR_CANVAS=""; BR_AGE=999999
   local f="$DATA_DIR/browser_signals"
@@ -330,7 +341,6 @@ parse_browser() {
       ch_ua) BR_CH_UA="$v" ;; ch_platform) BR_CH_PLAT="$v" ;; accept_lang) BR_ACCEPT="$v" ;;
       uad_platform) BR_UAD_PLAT="$v" ;; uad_brands) BR_UAD_BRANDS="$v" ;;
       sf_site) BR_SF_SITE="$v" ;; sf_mode) BR_SF_MODE="$v" ;; sf_dest) BR_SF_DEST="$v" ;;
-      reach_claude) BR_REACH_CLAUDE="$v" ;; reach_claude_ms) BR_REACH_CLAUDE_MS="$v" ;;
       reach_anthropic) BR_REACH_ANTHROPIC="$v" ;; reach_anthropic_ms) BR_REACH_ANTHROPIC_MS="$v" ;;
       reach_api) BR_REACH_API="$v" ;; reach_api_ms) BR_REACH_API_MS="$v" ;;
       rtc_srflx) BR_RTC="$v" ;; rtc_host) BR_RTC_HOST="$v" ;; rtc_status) BR_RTC_STATUS="$v" ;;
@@ -444,7 +454,14 @@ compute_score() {
   done
   [[ -n "$intel_codes" ]] && intel_unique=$(printf '%s\n' "$intel_codes" | sort -u | grep -c . | tr -d ' ')
   if [[ $intel_count -ge 2 && $intel_unique -eq 1 ]]; then
-    sig 出口 "多源情报一致" 3 100 "${intel_count}/4 · ${intel_display%% / *}"
+    if [[ "${ASN_MATCH:--1}" == "0" ]]; then
+      # 国家码一致但 ASN 归属分歧，风控按不同库判会得到不同结论，不能算"完全一致"
+      sig 出口 "多源情报一致" 3 50 "${intel_count}/4 · ${intel_display%% / *} · ASN 分歧" \
+        "同一出口 ${PROBE_IP} 的 ASN 归属不一致(ip-api: ${ASN_NUM} ${ISP} / ipinfo: ${ISP2})，这段 IP 的登记信息本身有争议" \
+        "换一个 ASN 归属明确、各情报库口径一致的节点"
+    else
+      sig 出口 "多源情报一致" 3 100 "${intel_count}/4 · ${intel_display%% / *}"
+    fi
   elif [[ $intel_count -ge 2 ]]; then
     sig 出口 "多源情报一致" 3 0 "${intel_count}/4 · ${intel_display}"       "多家 IP 情报库对同一出口 ${PROBE_IP} 的国家码判定不一致(${intel_display})" "换一个情报干净、归属明确的节点"
   elif [[ $intel_count -eq 1 ]]; then
@@ -472,7 +489,15 @@ compute_score() {
   elif [[ "$HOSTING" == "1" ]]; then
     sig 质量 "IP 类型" 4 50 "机房 IDC" "出口是机房(IDC) IP: ${ISP}，风控强度高于住宅" "有条件换住宅/家宽节点；至少保证独享且长期不变"
   elif [[ "$HOSTING" == "0" ]]; then
-    sig 质量 "IP 类型" 4 100 "住宅"
+    if [[ "${ASN_MATCH:--1}" == "0" ]]; then
+      # 只有 ip-api 说它是住宅；另一家把同一段登记成骨干/IDC 运营商。
+      # 这种"住宅"经不起风控交叉核对，不给满分。
+      sig 质量 "IP 类型" 4 70 "住宅(归属存疑)" \
+        "ip-api 判该出口为住宅(${ISP})，但 ipinfo 归到 ${ISP2} —— 可能是机房段被标成住宅" \
+        "优先选各情报库一致认定为住宅/家宽的节点"
+    else
+      sig 质量 "IP 类型" 4 100 "住宅"
+    fi
   else
     sig 质量 "IP 类型" 4 70 "未知"
   fi
@@ -802,7 +827,9 @@ gain_hint() {
     "Anthropic API 可达") echo "开全局代理，确认能直连 api.anthropic.com" ;;
     "claude.ai 可达")     echo "换干净节点，确认浏览器能打开 claude.ai" ;;
     "多源情报一致")      echo "换一个归属明确、情报干净的节点" ;;
-    "IP 类型")           echo "换住宅 / 家宽节点，别用机房 IP" ;;
+    "IP 类型")           [[ "${ASN_MATCH:--1}" == "0" && "${HOSTING:--1}" == "0" ]] \
+                           && echo "换各情报库口径一致的住宅节点(当前 ASN 归属有分歧)" \
+                           || echo "换住宅 / 家宽节点，别用机房 IP" ;;
     "边缘机房匹配")      echo "换地理归属真实的节点" ;;
     "出口链路单一")      echo "别叠多层代理，统一走同一个出口" ;;
     "三路出口一致")      echo "代理切全局模式，三路走同一出口" ;;
@@ -1060,6 +1087,7 @@ write_cstatus() {
     echo "colo=${CF_COLO:-?}"; echo "cfloc=${CF_LOC:-?}"; echo "cfip=${CF_IP:-?}"; echo "cfwarp=${CF_WARP:-?}"
     echo "api=${API_CODE}"; echo "web=${WEB_CODE}"; echo "site=${SITE_CODE}"; echo "apiregionblock=${API_REGION_BLOCK:-0}"
     echo "intelsources=${INTEL_SOURCES:-未采集}"; echo "intelcount=${INTEL_COUNT:-0}"
+    echo "asn2=${ISP2:-?}"; echo "asnmatch=${ASN_MATCH:--1}"
     echo "ipv6=${IPV6:-无}"; echo "ipv6country=${IPV6_CC:-?}"
     echo "consistent=${CONSISTENT}"; echo "systz=${SYS_TZ}"; echo "iptz=${GFW_TZ:-?}"
     echo "tzoffset=${TZ_OFFSET} ${TZ_ABBR}"; echo "locale=${SYS_LOCALE:-?}"; echo "langs=${SYS_LANGS:-?}"
@@ -1069,7 +1097,6 @@ write_cstatus() {
     echo "brrtc=${BR_RTC:-无}"; echo "brrtcstatus=${BR_RTC_STATUS:-未采集}"
     echo "brrtccandidates=${BR_RTC_CANDIDATES:-0}"; echo "brrtcpublic=${BR_RTC_PUBLIC_COUNT:-0}"
     echo "brrtcms=${BR_RTC_MS:-}"; echo "brfonts=${BR_FONTS:-?}"; echo "brwebgl=${BR_WEBGL:-?}"
-    echo "brclaude=${BR_REACH_CLAUDE:-未采集}"; echo "brclaudems=${BR_REACH_CLAUDE_MS:-}"
     echo "branthropic=${BR_REACH_ANTHROPIC:-未采集}"; echo "branthropicms=${BR_REACH_ANTHROPIC_MS:-}"
     echo "brapi=${BR_REACH_API:-未采集}"; echo "brapims=${BR_REACH_API_MS:-}"
     echo "brheaders=${BR_HEADER_INTEGRITY:-unknown}"
@@ -1139,7 +1166,7 @@ print_report() {
   echo "  CLI  ${CLAUDE_VER:-未检测到} · 接口 ${CLAUDE_BASE:-官方}"
   if [[ "$BR_OK" == "1" ]]; then
     echo "  浏览 ${BR_TZ} · ${BR_LANGS} · WebRTC ${BR_RTC_STATUS:-未采集}${BR_RTC:+/${BR_RTC}} · 候选 ${BR_RTC_CANDIDATES:-0} · ${BR_FONTS:-无中文字体}"
-    echo "  浏览器访问 claude.ai ${BR_REACH_CLAUDE:-未采集}${BR_REACH_CLAUDE_MS:+/${BR_REACH_CLAUDE_MS}ms} · anthropic.com ${BR_REACH_ANTHROPIC:-未采集}${BR_REACH_ANTHROPIC_MS:+/${BR_REACH_ANTHROPIC_MS}ms} · API ${BR_REACH_API:-未采集}${BR_REACH_API_MS:+/${BR_REACH_API_MS}ms}"
+    echo "  浏览器访问 anthropic.com ${BR_REACH_ANTHROPIC:-未采集}${BR_REACH_ANTHROPIC_MS:+/${BR_REACH_ANTHROPIC_MS}ms} · API ${BR_REACH_API:-未采集}${BR_REACH_API_MS:+/${BR_REACH_API_MS}ms}"
   else
     echo "  浏览 未采集(浏览器信号由菜单栏 App 的隐藏 WebView 提供，命令行单跑时没有)"
   fi
