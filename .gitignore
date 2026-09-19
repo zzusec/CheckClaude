@@ -2,6 +2,7 @@
 menubar/AutoTimezone.app/
 menubar/AutoTimezone
 menubar/CheckClaude.app/
+menubar/codex-guard
 *.dmg
 
 # 运行时数据 / 日志(含本机 IP，勿提交)

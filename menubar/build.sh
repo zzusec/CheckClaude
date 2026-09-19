@@ -8,11 +8,13 @@ BIN="CheckClaude"
 
 echo "编译 Swift ..."
 swiftc StatusApp.swift -o "$BIN" -framework Cocoa -framework WebKit -O
+swiftc CodexGuard.swift -o codex-guard -framework Network -O
 
 echo "组装 .app 包 ..."
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv "$BIN" "$APP/Contents/MacOS/$BIN"
+mv codex-guard "$APP/Contents/MacOS/codex-guard"
 
 # 把检测脚本打包进 App，实现自包含可分发
 cp ../auto-timezone.sh "$APP/Contents/Resources/auto-timezone.sh"
@@ -21,6 +23,8 @@ cp ../claude-check.sh "$APP/Contents/Resources/claude-check.sh"
 chmod +x "$APP/Contents/Resources/claude-check.sh"
 cp ../upgrade.sh "$APP/Contents/Resources/upgrade.sh"
 chmod +x "$APP/Contents/Resources/upgrade.sh"
+cp ../codex-guard.sh "$APP/Contents/Resources/codex-guard.sh"
+chmod +x "$APP/Contents/Resources/codex-guard.sh"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat >"$APP/Contents/Info.plist" <<'PLIST'
@@ -34,8 +38,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>CheckClaude</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>4.12</string>
-    <key>CFBundleVersion</key>          <string>4.12</string>
+    <key>CFBundleShortVersionString</key> <string>4.13</string>
+    <key>CFBundleVersion</key>          <string>4.13</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

@@ -5,6 +5,11 @@ DAEMON="com.example.checkclaude-daemon"
 AGENT="com.example.checkclaude"
 LEGACY_AGENT="com.hx10.checkclaude"
 
+echo "==> 断开 Codex 防降智(还原 ~/.codex/config.toml)"
+for s in /Applications/CheckClaude.app/Contents/Resources/codex-guard.sh "$(dirname "$0")/codex-guard.sh"; do
+  [ -f "$s" ] && bash "$s" --disable >/dev/null 2>&1 && break
+done
+
 echo "==> 卸载菜单栏 App"
 for id in "$AGENT" "$LEGACY_AGENT"; do
   launchctl bootout "gui/$(id -u)/$id" 2>/dev/null || true
