@@ -634,12 +634,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // 定时主动检测(默认 1 分钟，可在菜单"检测间隔"调整)
         startScanTimer()
-        // Codex 防降智默认开启；用户在菜单里手动关过之后就不再自动接入
-        if UserDefaults.standard.bool(forKey: "codexGuardOptOut") {
-            refreshCodexGuard()
-        } else {
-            runScript(["--enable"], codexGuardScriptPath) { [weak self] _ in self?.refreshCodexGuard() }
-        }
+        // Codex 防降智默认开启，接入失败脚本自己回滚，不打扰用户
+        runScript(["--enable"], codexGuardScriptPath) { [weak self] _ in self?.refreshCodexGuard() }
         // 版本检查: 启动时一次，之后每 2 小时。GitHub API 匿名限额 60 次/小时，这个频率很安全
         runScript(["--check"], upgradeScriptPath) { [weak self] _ in self?.refresh() }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 2 * 3600, repeats: true) { [weak self] _ in
@@ -669,36 +665,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Codex 防降智
 
-    /// 反代由 LaunchAgent 常驻，App 退出也不会断，这里只负责显示和开关
+    /// 反代由 LaunchAgent 常驻，用户不用管它，菜单只留一行状态；
+    /// 没装 codex 或走第三方中转时整行不出现。要关就跑 codex-guard.sh --disable
     func codexGuardMenuItems() -> [NSMenuItem] {
         var s = readStatus(codexGuardPath)                       // 脚本写的接入状态
         readStatus(codexGuardStatusPath).forEach { s[$0] = $1 }  // 反代写的实时状态
-        guard s["codex"] == "1" else { return [disabled("🛡 Codex 防降智: 未检测到 codex")] }
-        let provider = s["provider"] ?? "chatgpt"
-        guard provider == "chatgpt" else {
-            return [disabled("🛡 Codex 防降智: codex 走 \(provider)，非官方链路不接入")]
+        guard s["codex"] == "1", (s["provider"] ?? "chatgpt") == "chatgpt" else { return [] }
+        guard s["linked"] == "1", s["running"] == "1" else {
+            return [colored("🛡 Codex 防降智 · 未生效", .systemOrange)]
         }
-        if s["linked"] == "1", s["running"] == "1" {
-            let ttl = max(0, (Int(s["expires"] ?? "") ?? 0) - Int(Date().timeIntervalSince1970)) / 60
-            let detail = s["state"] == "ready" ? "复用中 · 剩 \(ttl) 分钟" : "等待采集"
-            return [
-                colored("🛡 Codex 防降智: 已接入 · \(detail)", .systemGreen),
-                disabled("   注入 \(s["injected"] ?? "0")/\(s["requests"] ?? "0") 次 · 探针 \(s["probe"] ?? "-")"),
-                action("关闭 Codex 防降智", #selector(toggleCodexGuard)),
-            ]
-        }
-        return [
-            colored("🛡 Codex 防降智: 未接入", .systemOrange),
-            action("开启 Codex 防降智", #selector(toggleCodexGuard)),
-        ]
-    }
-
-    @objc func toggleCodexGuard() {
-        let on = readStatus(codexGuardPath)["linked"] == "1"
-        UserDefaults.standard.set(on, forKey: "codexGuardOptOut")   // 手动关过就不再自动接入
-        runScript([on ? "--disable" : "--enable"], codexGuardScriptPath) { [weak self] _ in
-            self?.refreshCodexGuard()
-        }
+        return [colored("🛡 Codex 防降智 · \(s["state"] == "ready" ? "生效中" : "待采集")", .systemGreen)]
     }
 
     func refreshCodexGuard() {
@@ -1003,8 +979,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(mi)
         }
         menu.addItem(.separator())
-        for i in codexGuardMenuItems() { menu.addItem(i) }
-        menu.addItem(.separator())
+        let codexItems = codexGuardMenuItems()
+        if !codexItems.isEmpty {
+            codexItems.forEach { menu.addItem($0) }
+            menu.addItem(.separator())
+        }
         if scanProcess != nil {
             menu.addItem(disabled("正在检测出口…"))
         } else {
