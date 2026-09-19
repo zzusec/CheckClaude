@@ -1261,7 +1261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if status == "error" { return "异常" }
                 return "未采集"
             }
-            sub.addItem(disabled("浏览器访问: Claude \(reach("brclaude", "brclaudems")) · 官网 \(reach("branthropic", "branthropicms")) · API \(reach("brapi", "brapims"))"))
+            sub.addItem(disabled("浏览器访问: 官网 \(reach("branthropic", "branthropicms")) · API \(reach("brapi", "brapims"))"))
             let rtcStatus: String = {
                 switch c["brrtcstatus"] ?? "未采集" {
                 case "ok": return "完成"
@@ -1622,8 +1622,9 @@ final class BrowserProbe: NSObject, WKScriptMessageHandler {
             out['reach_' + key + '_ms'] = '';
           } finally { clearTimeout(timer); }
         };
+        // 不探 claude.ai: 它拒绝一切跨站子资源请求(fetch/img)，在任何第三方页面里都恒 error，
+        // 与本机链路无关(顶层导航是正常的)。可达性以 shell 侧 curl robots.txt 为准。
         const reachPromise = Promise.all([
-          reachOne('claude', 'https://claude.ai/'),
           reachOne('anthropic', 'https://www.anthropic.com/'),
           reachOne('api', 'https://api.anthropic.com/')
         ]);
@@ -2049,7 +2050,7 @@ final class BrowserBridge {
               try{const c=document.createElement("canvas"),gl=c.getContext("webgl")||c.getContext("experimental-webgl"),dbg=gl&&gl.getExtension("WEBGL_debug_renderer_info");if(gl){set("webgl_vendor",dbg?gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR));set("webgl_renderer",dbg?gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER));set("webgl",o.webgl_vendor+" · "+o.webgl_renderer);}}catch(e){}
               try{const probe=["PingFang SC","PingFang TC","Hiragino Sans GB","Microsoft YaHei","Microsoft JhengHei","SimSun","SimHei","MingLiU","Songti SC","STHeiti","Noto Sans CJK SC","Noto Sans CJK TC","Source Han Sans SC","MiSans","HarmonyOS Sans SC","OPPO Sans","vivo Sans"];const sp=document.createElement("span");sp.style.cssText="position:absolute;left:-9999px;font-size:72px";sp.textContent="mmmmmmmmmmlli测试";document.body.appendChild(sp);sp.style.fontFamily="monospace";const base=sp.offsetWidth;const found=probe.filter(f=>{sp.style.fontFamily="'"+f+"',monospace";return sp.offsetWidth!==base;});sp.remove();set("fonts",found.join(","));set("fonts_sc",found.filter(f=>/SC|YaHei|SimSun|SimHei|Songti|STHeiti|MiSans|HarmonyOS|OPPO|vivo|Hiragino/i.test(f)).join(","));set("fonts_tc",found.filter(f=>/TC|JhengHei|MingLiU|PingFang TC/i.test(f)).join(","));set("fonts_vendor",found.filter(f=>/MiSans|HarmonyOS|OPPO|vivo/i.test(f)).join(","));}catch(e){}
               const reachOne=async(key,url)=>{const started=performance.now(),ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),3500);try{await fetch(url,{mode:"no-cors",cache:"no-store",signal:ctl.signal});set("reach_"+key,"ok");set("reach_"+key+"_ms",Math.round(performance.now()-started));}catch(e){set("reach_"+key,e&&e.name==="AbortError"?"timeout":"error");set("reach_"+key+"_ms","");}finally{clearTimeout(timer);}};
-              const reachPromise=Promise.all([reachOne("claude","https://claude.ai/"),reachOne("anthropic","https://www.anthropic.com/"),reachOne("api","https://api.anthropic.com/")]);
+              const reachPromise=Promise.all([reachOne("anthropic","https://www.anthropic.com/"),reachOne("api","https://api.anthropic.com/")]);
               set("rtc_host","");set("rtc_srflx","");set("rtc_candidate_count",0);set("rtc_public_count",0);set("rtc_supported",0);set("rtc_status","unsupported");
               if("RTCPeerConnection" in window){set("rtc_supported",1);set("rtc_status","collecting");const started=performance.now();try{const pc=new RTCPeerConnection({iceServers:[{urls:"stun:stun.cloudflare.com:3478"},{urls:"stun:stun.l.google.com:19302"}]});pc.createDataChannel("p");const hosts=new Set(),srflx=new Set();let candidates=0,completed=false,finish;const gathered=new Promise(r=>{finish=r;});pc.onicecandidate=e=>{if(!e.candidate){completed=true;finish();return;}candidates++;const c=e.candidate.candidate,m=c.match(/([0-9]{1,3}(?:\\.[0-9]{1,3}){3})/);if(!m)return;if(c.includes("typ host"))hosts.add(m[1]);if(c.includes("typ srflx"))srflx.add(m[1]);};pc.onicegatheringstatechange=()=>{if(pc.iceGatheringState==="complete"){completed=true;finish();}};await pc.setLocalDescription(await pc.createOffer());await Promise.race([gathered,new Promise(r=>setTimeout(r,4500))]);set("rtc_host",[...hosts].join(","));set("rtc_srflx",[...srflx].join(","));set("rtc_candidate_count",candidates);set("rtc_public_count",srflx.size);set("rtc_elapsed_ms",Math.round(performance.now()-started));set("rtc_status",srflx.size>0?"ok":completed?"none":"timeout");pc.close();}catch(e){set("rtc_status","error");set("rtc_elapsed_ms",Math.round(performance.now()-started));set("rtc_err",String(e).slice(0,80));}}
               await reachPromise;
