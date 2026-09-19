@@ -1,4 +1,4 @@
-﻿param([string]$Version = "3.1")
+﻿param([string]$Version = "4.12")
 # 用 Windows 自带的 csc.exe 编译，产物是单个 exe，目标机不需要装任何运行时。
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path

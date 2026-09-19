@@ -1960,9 +1960,9 @@ final class BrowserBridge {
           function renderReport(report){
             const c=report.claude||{}, n=report.network||{}, b=report.browser||o, q=report.quality||{};
             document.title="CheckClaude v"+txt(report.version,"?")+" 完整体检报告";
-            const countdownText=element("span","","完整报告已生成，页面将在 4 秒后自动关闭。"), keepOpen=element("button","close","保持打开");
+            const countdownText=element("span","","完整报告已生成，页面将在 5 秒后自动关闭。"), keepOpen=element("button","close","保持打开");
             status.replaceChildren(element("span","pill good","检测完成"),countdownText,keepOpen);
-            let remaining=4, closeCancelled=false;
+            let remaining=5, closeCancelled=false;
             const closeTimer=setInterval(()=>{
               if(closeCancelled){clearInterval(closeTimer);return;}
               remaining-=1;

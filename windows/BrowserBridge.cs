@@ -250,7 +250,7 @@ td{padding:.45rem 0;color:#1a1a2e;word-break:break-all}tr+tr th,tr+tr td{border-
     ];
     document.getElementById('d').innerHTML = '<table>' + rows.map(function (r) { return '<tr><th>' + r[0] + '</th><td>' + r[1] + '</td></tr>'; }).join('') + '</table>';
     document.getElementById('f').style.display = 'block';
-    var n = 10, stopped = false;
+    var n = 5, stopped = false;
     var cd = document.getElementById('cd'), keep = document.getElementById('keep');
     keep.onclick = function () { stopped = true; cd.textContent = '已取消自动关闭，可手动关闭本页。'; keep.style.display = 'none'; };
     var t = setInterval(function () {
