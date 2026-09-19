@@ -691,7 +691,7 @@ compute_score() {
     esac
 
     if [[ "$BR_TZ" == "$SYS_TZ" ]]; then
-      sig 浏览器 "浏览器时区" 3 100 "$BR_TZ$([[ "$BR_SOURCE" == browser ]] && echo " (真实浏览器)")"
+      sig 浏览器 "浏览器时区" 3 100 "$BR_TZ"
     else
       sig 浏览器 "浏览器时区" 3 25 "$BR_TZ ≠ $SYS_TZ" \
         "浏览器时区 ${BR_TZ} 与系统时区 ${SYS_TZ} 不一致" "重启浏览器让它重新读系统时区"
@@ -767,7 +767,9 @@ compute_score() {
 
     # 渲染环境: WebGL 渲染器 + 中文字体探测。字体是"国产终端弱信号"——
     # 装着一堆中文字体本身不是问题(macOS 自带 PingFang)，只在拿不到 GPU 信息时才扣分
-    local render_desc="${BR_WEBGL:0:24}"
+    # WebGL 串很长("ANGLE (Apple, ANGLE Metal Renderer: Apple M3, ...)")，只留 GPU 型号
+    local gpu="${BR_WEBGL##*Renderer: }"; gpu="${gpu%%,*}"
+    local render_desc="${gpu:0:16}"
     [[ -n "$BR_FONTS" ]] && render_desc+=" · $(echo "$BR_FONTS" | awk -F, '{print NF}') 中文字体"
     if [[ -n "$BR_WEBGL" ]]; then
       sig 浏览器 "渲染环境" 2 100 "$render_desc"
@@ -801,17 +803,17 @@ compute_score() {
   # 只按扣分算(才 5 分)会让 80 多分的环境显示"良好"，与红色图标自相矛盾 —— 硬降级。
   elif [[ "$CONSISTENT" != "1" ]]; then
     GRADE="风险"
-    VERDICT="出口 IP 分流(国内 ${CN_IP} / 国外 ${INTL_IP})，账号画像会在多地区间跳变，不建议使用"
+    VERDICT="出口 IP 分流(${CN_IP} / ${INTL_IP})，画像跳变，不建议使用"
   # 档位措辞按二元标准: 只有绿档说"可用"，其余一律明说"不建议使用" ——
   # 原来 83 分显示"良好"，和橙色图标、"不建议使用"的通知自相矛盾。
   elif [[ $SCORE -ge 90 && -z "$crit_fail" ]]; then GRADE="优秀"; VERDICT="环境适合运行 Claude"
   elif [[ -n "$crit_fail" ]]; then
-    GRADE="有风险"; VERDICT="关键项未达标（${crit_fail}），不建议使用 Claude"
+    GRADE="有风险"; VERDICT="关键项未达标（${crit_fail}），不建议使用"
     [[ $SCORE -lt 70 ]] && GRADE="高风险"
     [[ $SCORE -lt 50 ]] && GRADE="危险"
-  elif [[ $SCORE -ge 70 ]]; then GRADE="有风险"; VERDICT="存在矛盾信号，不建议使用 Claude，先按提示修复"
-  elif [[ $SCORE -ge 50 ]]; then GRADE="高风险"; VERDICT="多项信号冲突，不建议在当前环境登录或使用 Claude"
-  else                           GRADE="危险"; VERDICT="环境画像严重冲突，使用 Claude 有较高封号风险"
+  elif [[ $SCORE -ge 70 ]]; then GRADE="有风险"; VERDICT="有矛盾信号，先按提示修复"
+  elif [[ $SCORE -ge 50 ]]; then GRADE="高风险"; VERDICT="多项信号冲突，不建议登录"
+  else                           GRADE="危险"; VERDICT="画像严重冲突，封号风险高"
   fi
 
   # 分数只是量化参考；关键项失败、不支持地区或三路分流必须覆盖高分。
@@ -823,42 +825,42 @@ compute_score() {
 # 这里说的是"下一步动手做什么"，菜单里按差值从大到小排给用户看。
 gain_hint() {
   case "$1" in
-    "出口国家")          echo "换到 US / JP / SG 等支持地区的节点" ;;
-    "Anthropic API 可达") echo "开全局代理，确认能直连 api.anthropic.com" ;;
-    "claude.ai 可达")     echo "换干净节点，确认浏览器能打开 claude.ai" ;;
-    "多源情报一致")      echo "换一个归属明确、情报干净的节点" ;;
+    "出口国家")          echo "换 US / JP / SG 节点" ;;
+    "Anthropic API 可达") echo "开全局代理直连 API" ;;
+    "claude.ai 可达")     echo "换干净节点" ;;
+    "多源情报一致")      echo "换归属明确的干净节点" ;;
     "IP 类型")           [[ "${ASN_MATCH:--1}" == "0" && "${HOSTING:--1}" == "0" ]] \
-                           && echo "换各情报库口径一致的住宅节点(当前 ASN 归属有分歧)" \
-                           || echo "换住宅 / 家宽节点，别用机房 IP" ;;
-    "边缘机房匹配")      echo "换地理归属真实的节点" ;;
-    "出口链路单一")      echo "别叠多层代理，统一走同一个出口" ;;
-    "三路出口一致")      echo "代理切全局模式，三路走同一出口" ;;
-    "系统时区匹配出口")  echo "点「一键修复」即可自动改" ;;
-    "时区偏移自洽")      echo "清掉 shell 里的 TZ 环境变量后重开终端" ;;
-    "系统区域匹配出口")  echo "菜单里点「把系统区域改为 XX」" ;;
+                           && echo "换 ASN 归属一致的住宅节点" \
+                           || echo "换住宅 / 家宽节点" ;;
+    "边缘机房匹配")      echo "换归属真实的节点" ;;
+    "出口链路单一")      echo "别叠多层代理" ;;
+    "三路出口一致")      echo "代理切全局模式" ;;
+    "系统时区匹配出口")  echo "点「一键修复」" ;;
+    "时区偏移自洽")      echo "清掉 TZ 变量后重开终端" ;;
+    "系统区域匹配出口")  echo "点「把系统区域改为 XX」" ;;
     "代理形态")
-      if [[ "$PAC_ON" == "1" ]]; then echo "点一键修复关闭 PAC；再在代理客户端开启 TUN / 虚拟网卡模式"
-      elif [[ "$CONSISTENT" == "1" && "$CF_IP" == "$PROBE_IP" ]]; then echo "三路与 Cloudflare 出口已一致；若代理在路由器/网关上可忽略，否则在代理客户端开启 TUN"
-      else echo "在代理客户端开启 TUN / 虚拟网卡模式，并关闭 PAC/自动分流"
+      if [[ "$PAC_ON" == "1" ]]; then echo "点「一键修复」关 PAC，再开 TUN"
+      elif [[ "$CONSISTENT" == "1" && "$CF_IP" == "$PROBE_IP" ]]; then echo "代理在网关上可忽略，否则开 TUN"
+      else echo "代理开 TUN，关掉 PAC 分流"
       fi ;;
-    "出口稳定性")        echo "固定一个节点，24 小时内别切线路(到点自动回满)" ;;
-    "运行容器")          echo "在物理机上登录和使用，别在虚拟机里" ;;
-    "claude.ai 解析")     echo "换 DNS 或让代理接管 DNS" ;;
+    "出口稳定性")        echo "24h 内别切线路，到点回满" ;;
+    "运行容器")          echo "别在虚拟机里用" ;;
+    "claude.ai 解析")     echo "换 DNS 或让代理接管" ;;
     "DNS 出口")
-      if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then echo "点「一键修复」换成验证过的境外 DNS"
-      elif [[ "$DNS_SCOPE" == 境外/自定义* ]]; then echo "当前境外 DNS 可用；若要满分，让代理 TUN/fake-ip 接管 DNS，否则此 1 分可忽略"
-      else echo "让代理接管 DNS（fake-ip/加密 DNS），避免解析路径与出口不一致"
+      if [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]]; then echo "点「一键修复」换境外 DNS"
+      elif [[ "$DNS_SCOPE" == 境外/自定义* ]]; then echo "境外 DNS 可用，此 1 分可忽略"
+      else echo "让代理接管 DNS(fake-ip)"
       fi ;;
-    "WebRTC 出口")       echo "代理开 TUN 模式接管 UDP，或浏览器禁用 WebRTC" ;;
-    "浏览器时区")        echo "重启浏览器，让它重新读系统时区" ;;
-    "浏览器语言")        echo "把浏览器首选语言调成 en-US" ;;
-    "渲染环境")          echo "从菜单栏 App 体检(命令行单跑拿不到浏览器信号)" ;;
-    "anthropic.com 可达") echo "开全局代理后重试；持续 403 说明该节点被 Anthropic 拦" ;;
-    "IPv6 出口")         echo "代理设置里开启 IPv6 接管；或 系统设置 → 网络 → 详细信息 → TCP/IP → 配置 IPv6 选「关闭」" ;;
-    "语言变体一致")      echo "仅用 Claude Code 可忽略；常用网页端就在 系统设置 → 通用 → 语言与地区 把首选语言拖成 English" ;;
-    "Intl 区域设置")     echo "浏览器设置里把语言/区域调成与出口地区一致（Chrome: 设置 → 语言）" ;;
-    "Client Hints")      echo "关掉浏览器里改 UA 的插件，用原生浏览器打开 claude.ai" ;;
-    "HTTP 语言首标")     echo "浏览器设置 → 语言，把 English (United States) 拖到第一位" ;;
+    "WebRTC 出口")       echo "代理开 TUN 接管 UDP" ;;
+    "浏览器时区")        echo "重启浏览器" ;;
+    "浏览器语言")        echo "浏览器语言调成 en-US" ;;
+    "渲染环境")          echo "从菜单栏 App 体检" ;;
+    "anthropic.com 可达") echo "开全局代理；持续 403 换节点" ;;
+    "IPv6 出口")         echo "代理接管 IPv6，或系统关闭 IPv6" ;;
+    "语言变体一致")      echo "首选语言拖成 English" ;;
+    "Intl 区域设置")     echo "浏览器语言/区域跟出口一致" ;;
+    "Client Hints")      echo "关掉改 UA 的插件" ;;
+    "HTTP 语言首标")     echo "浏览器语言首位设 English" ;;
     *)                   echo "重新体检" ;;
   esac
 }
@@ -876,7 +878,7 @@ build_gains() {
   while IFS='~' read -r diff l v; do
     [[ -z "$diff" ]] && continue
     if [[ "$v" == *未采集* ]]; then
-      hint="从菜单栏 App 点「重新体检」(命令行单跑没有浏览器信号)"
+      hint="从菜单栏 App 重新体检"
     else
       hint=$(gain_hint "$l")
     fi
