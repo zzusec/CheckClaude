@@ -25,10 +25,14 @@ Claude 环境 🟢 98 分 · 优秀
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
+### v4.14（2026-09-18）
+
+- Codex 防降智菜单精简为一行状态：去掉开关项和注入计数，没装 codex 或走第三方中转时整行不显示。
+
 ### v4.13（2026-09-18）
 
 - 新增 **Codex 防降智**（默认开启）：本机反代 `chatgpt.com/backend-api`，采集并跨会话复用 `x-codex-turn-state`，让新会话不必每次从冷状态起步。思路参考 [tzf1003/csss](https://github.com/tzf1003/csss)，但不需要 Surge、不装证书、不改系统代理。
-- 菜单栏可随时开关；只在 codex 走官方 ChatGPT 登录时接入，走第三方中转时自动跳过。
+- 默认常驻不需要勾选，菜单栏只显示一行状态；只在 codex 走官方 ChatGPT 登录时接入，走第三方中转时自动跳过。
 - 关闭或卸载会还原 `~/.codex/config.toml`，备份留在 `config.toml.checkclaude-backup`。
 
 ### v4.10（2026-09-18）
@@ -261,7 +265,7 @@ codex ──► 127.0.0.1:8788/backend-api ──► chatgpt.com/backend-api
              采集 / 校验 / 注入 state
 ```
 
-- **默认开启**，菜单栏「🛡 Codex 防降智」随时可关；手动关过之后不会再自动接入。
+- **默认开启、后台常驻**，不需要勾选；菜单栏只显示一行状态，要关跑 `codex-guard.sh --disable`。
 - 只在 codex 走官方 ChatGPT 登录时接入；`model_provider` 指向第三方中转时自动跳过（注入对上游没有意义）。
 - 接入方式是在 `~/.codex/config.toml` 顶部写 `chatgpt_base_url`，原文件备份为 `config.toml.checkclaude-backup`，关闭 / 卸载时逐行还原。
 - state 只校验结构（`0x80` 开头、10 块、签发时间在有效期内），不合格不缓存；只留在反代进程内存里，落盘的只有指纹和计数。
