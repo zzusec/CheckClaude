@@ -159,7 +159,7 @@ check "页面轮询完整报告" "$(grep -c '/report?t=' "$TMP_DIR/report.html" 
 check "完成后回收 localhost listener" "$(grep -c '/close?t=' "$TMP_DIR/report.html" || true)" 2
 check "动态值使用 textContent" "$([[ $(grep -c 'textContent' "$TMP_DIR/report.html" || true) -ge 2 ]] && echo yes)" yes
 check "包含 CSP" "$(grep -c 'Content-Security-Policy' "$ROOT/menubar/StatusApp.swift" || true)" 1
-check "完成后启动 4 秒倒计时" "$(grep -c 'let remaining=4' "$TMP_DIR/report.html" || true)" 1
+check "完成后启动 5 秒倒计时" "$(grep -c 'let remaining=5' "$TMP_DIR/report.html" || true)" 1
 check "倒计时结束调用 window.close" "$(grep -c 'escapeClose();window.close()' "$TMP_DIR/report.html" || true)" 1
 check "提供保持打开按钮" "$(grep -c '保持打开' "$TMP_DIR/report.html" || true)" 1
 check "不再保留旧的 10 秒倒计时" "$(grep -c '10 秒后自动关闭\|本页将在 10 秒' "$TMP_DIR/report.html" || true)" 0

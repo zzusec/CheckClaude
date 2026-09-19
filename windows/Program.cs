@@ -182,7 +182,8 @@ namespace CheckClaude
         public string CnIp, IntlIp, GfwIp, ProbeIp;
         public bool GoogleReachable;
         public bool Consistent;
-        public string Country, CountryName, City, Isp, Asn, Country2;
+        public string Country, CountryName, City, Isp, Asn, Country2, Isp2;
+        public int AsnMatch = -1;   // -1 数据不足 0 两家 ASN 归属不一致 1 一致
         public int Hosting = -1;     // -1 未知 0 住宅 1 机房
         public bool Proxy;
         public string CfColo, CfLoc, CfIp;
@@ -299,6 +300,14 @@ namespace CheckClaude
                 }
                 var b = t2.Result;
                 f.Country2 = Net.Json(b, "country");
+                f.Isp2 = Net.Json(b, "org");
+                // ASN 交叉比对: 国家码一致不等于归属一致。同一个 IP 在 ip-api 报 AS5065 住宅 ISP、
+                // 在 ipinfo 报 AS3257 GTT(骨干/IDC)，说明这段 IP 的归属登记本身有分歧 ——
+                // 风控侧按哪一家判都有可能，只比国家码会把这种 IP 当成干净住宅放过去。
+                var an1 = Regex.Match(f.Asn ?? "", @"^AS\d+").Value;
+                var an2 = Regex.Match(f.Isp2 ?? "", @"^AS\d+").Value;
+                f.AsnMatch = (an1.Length > 0 && an2.Length > 0)
+                    ? (string.Equals(an1, an2, StringComparison.OrdinalIgnoreCase) ? 1 : 0) : -1;
                 if (f.Country == null && f.Country2 != null)
                 {
                     f.Country = f.Country2; f.CountryName = f.Country2;
@@ -655,7 +664,13 @@ namespace CheckClaude
 
             if (!string.IsNullOrEmpty(f.Country) && !string.IsNullOrEmpty(f.Country2))
             {
-                if (string.Equals(f.Country, f.Country2, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(f.Country, f.Country2, StringComparison.OrdinalIgnoreCase) && f.AsnMatch == 0)
+                    // 国家码一致但 ASN 归属分歧，风控按不同库判会得到不同结论，不能算"完全一致"
+                    r.Sig("出口", "多源情报一致", 3, 50, f.Country + " = " + f.Country2 + " · ASN 分歧",
+                        "换一个 ASN 归属明确、各情报库口径一致的节点",
+                        "同一出口 " + f.ProbeIp + " 的 ASN 归属不一致(ip-api: " + f.Asn + " / ipinfo: " + f.Isp2 + ")，这段 IP 的登记信息本身有争议",
+                        "换一个 ASN 归属明确、各情报库口径一致的节点");
+                else if (string.Equals(f.Country, f.Country2, StringComparison.OrdinalIgnoreCase))
                     r.Sig("出口", "多源情报一致", 3, 100, f.Country + " = " + f.Country2, null);
                 else
                     r.Sig("出口", "多源情报一致", 3, 0, f.Country + " ≠ " + f.Country2, "换一个归属明确、情报干净的节点",
@@ -670,6 +685,12 @@ namespace CheckClaude
             else if (f.Hosting == 1)
                 r.Sig("质量", "IP 类型", 4, 50, "机房 IDC", "换住宅 / 家宽节点",
                     "出口是机房(IDC) IP: " + f.Isp + "，风控强度高于住宅", "有条件换住宅/家宽节点");
+            else if (f.Hosting == 0 && f.AsnMatch == 0)
+                // 只有 ip-api 说它是住宅；另一家把同一段登记成骨干/IDC 运营商。
+                // 这种"住宅"经不起风控交叉核对，不给满分。
+                r.Sig("质量", "IP 类型", 4, 70, "住宅(归属存疑)", "换各情报库口径一致的住宅节点",
+                    "ip-api 判该出口为住宅(" + f.Isp + ")，但 ipinfo 归到 " + f.Isp2 + " —— 可能是机房段被标成住宅",
+                    "优先选各情报库一致认定为住宅/家宽的节点");
             else if (f.Hosting == 0) r.Sig("质量", "IP 类型", 4, 100, "住宅", null);
             else r.Sig("质量", "IP 类型", 4, 70, "未知", "重新体检");
 
