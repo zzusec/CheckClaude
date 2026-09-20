@@ -1396,10 +1396,22 @@ namespace CheckClaude
 
                 var self = Application.ExecutablePath;
                 var bat = Path.Combine(tmp, "upd.bat");
+                // 原来死等 2 秒就覆盖：本进程没退干净时单实例 Mutex 还占着，新实例会被
+                // 静默挡掉，升级完 App 就再也不出现了。改成轮询——正在运行的 exe 是锁住的，
+                // copy 能成功本身就证明旧进程已经退干净。最多等 30 秒，等不到也要把旧版拉回来，
+                // 不能让用户落到「没有 App」的状态。
                 File.WriteAllText(bat,
                     "@echo off\r\n" +
-                    "ping 127.0.0.1 -n 3 >nul\r\n" +                       // 等本进程退出
-                    "copy /Y \"" + newExe + "\" \"" + self + "\" >nul\r\n" +
+                    "set /a n=0\r\n" +
+                    ":wait\r\n" +
+                    "copy /Y \"" + newExe + "\" \"" + self + "\" >nul 2>&1\r\n" +
+                    "if not errorlevel 1 goto ok\r\n" +
+                    "set /a n+=1\r\n" +
+                    "if %n% geq 30 goto giveup\r\n" +
+                    "ping 127.0.0.1 -n 2 >nul\r\n" +
+                    "goto wait\r\n" +
+                    ":ok\r\n" +
+                    ":giveup\r\n" +
                     "start \"\" \"" + self + "\"\r\n" +
                     "rmdir /S /Q \"" + tmp + "\"\r\n", Encoding.Default);
                 Process.Start(new ProcessStartInfo(bat) { WindowStyle = ProcessWindowStyle.Hidden, UseShellExecute = true });
@@ -1819,7 +1831,10 @@ namespace CheckClaude
             m.Items.Add(Item("官方网站",
                 (s, e) => { try { Process.Start("https://www.yinso.com/labs/"); } catch { } }));
             m.Items.Add(new ToolStripSeparator());
-            m.Items.Add(Item("退出", (s, e) => { icon.Visible = false; Application.Exit(); }));
+            // 必须 Dispose：只设 Visible=false 会把图标留在托盘里直到鼠标划过，
+            // 用户以为没退掉。退出后 Main 里还有一道 Environment.Exit 兜底，
+            // 保证进程真正终止、单实例 Mutex 真正释放。
+            m.Items.Add(Item("退出", (s, e) => { icon.Visible = false; icon.Dispose(); Application.Exit(); }));
         }
 
         static void AppendManualPlan(StringBuilder sb, List<Signal> manual)
@@ -2036,13 +2051,23 @@ namespace CheckClaude
         static int RunTray()
         {
             bool created;
-            using (new Mutex(true, "CheckClaude.SingleInstance", out created))
+            using (new Mutex(true, @"Local\CheckClaude.SingleInstance", out created))
             {
-                if (!created) return 0;               // 已经在跑就别开第二个托盘图标
+                if (!created)
+                {
+                    // 原来是静默 return 0：用户双击后屏幕上什么都不发生，体感就是「打不开」。
+                    // 托盘图标此刻归另一个实例所有，这里只能用对话框告诉用户去哪找。
+                    MessageBox.Show("CheckClaude 已经在运行了，图标在任务栏右下角的托盘区。",
+                        "CheckClaude", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 0;
+                }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new TrayApp());
             }
+            // 兜底：有前台线程残留时进程不会自己结束，Mutex 就一直占着，
+            // 下次启动会被自己挡在门外。
+            Environment.Exit(0);
             return 0;
         }
     }
