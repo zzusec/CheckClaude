@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CheckClaude
+Name[zh_CN]=CheckClaude 环境体检
+Comment=CheckClaude tray indicator
+Comment[zh_CN]=CheckClaude 托盘指示器
+Exec=checkclaude-tray
+Icon=security-high
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

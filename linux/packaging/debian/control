@@ -1,0 +1,14 @@
+Package: checkclaude
+Version: __VERSION__
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: libgtk-3-0 | libgtk-3-0t64, libayatana-appindicator3-1, xdg-utils, curl
+Maintainer: zzusec <hzsinno@gmail.com>
+Homepage: https://github.com/zzusec/CheckClaude
+Description: Claude runtime environment checker
+ CheckClaude scores 26 network and system signals to tell you whether this
+ machine's exit IP, timezone, locale, DNS and browser fingerprint are
+ consistent enough to run Claude without being flagged.
+ .
+ Ships a CLI (checkclaude) and a GTK tray indicator (checkclaude-tray).

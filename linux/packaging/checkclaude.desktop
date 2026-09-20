@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=CheckClaude
+Name[zh_CN]=CheckClaude 环境体检
+Comment=Check whether this machine's network environment is suitable for Claude
+Comment[zh_CN]=体检本机网络环境是否适合运行 Claude
+Exec=checkclaude-tray
+Icon=security-high
+Terminal=false
+Categories=Network;Utility;Security;
+Keywords=claude;network;proxy;check;
+StartupNotify=false
