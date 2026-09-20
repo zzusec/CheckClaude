@@ -22,8 +22,39 @@ Claude 环境 🟢 98 分 · 优秀
 
 | 平台 | 下载 | 要求 |
 |---|---|---|
-| macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
+| macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，Apple 芯片与 Intel 通用二进制，拖进 Applications，首次打开见下方说明 |
 | Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
+| Linux | [checkclaude-amd64.deb](https://github.com/zzusec/CheckClaude/releases/latest/download/checkclaude-amd64.deb) / [tar.gz](https://github.com/zzusec/CheckClaude/releases/latest/download/checkclaude-linux-amd64.tar.gz) | Debian/Ubuntu amd64，CLI 静态二进制 + GTK 托盘 |
+
+Linux 版是纯 Go 静态二进制（CLI，无 GTK 依赖）加一个 GTK3 + Ayatana AppIndicator 托盘。
+服务器上只装 CLI 也能跑；桌面装 `.deb` 会同时装托盘并注册开机自启。
+
+```bash
+sudo dpkg -i checkclaude-amd64.deb   # 缺依赖时补 sudo apt -f install
+
+checkclaude --check         # 完整体检报告
+checkclaude --json          # 机器可读 JSON
+checkclaude --browser       # 打开默认浏览器采集真实指纹并展示网页报告
+checkclaude --fix           # 执行安全可恢复的修复（时区 / GNOME PAC）
+checkclaude --fix-locale    # 额外写入用户级区域格式覆盖，不改显示语言
+checkclaude --tray-status   # 托盘用的单行 TSV
+checkclaude --version
+```
+
+改系统时区需要提权：root 直接改，桌面用户走 `pkexec`，都拿不到时只打印手动命令。
+Linux 版首版不会自动改 `/etc/resolv.conf`、NetworkManager、IPv6、系统显示语言和浏览器配置。
+
+### v4.17（2026-09-20）
+
+- **新增 Linux 版**：CLI + GTK 托盘，与 macOS / Windows 同一套 26 项加权评分模型。
+- **真正支持 macOS 12+**：此前构建未指定部署目标，二进制的最低系统版本跟着构建机走，
+  低于该版本的 macOS 上 dyld 直接拒绝启动，`Info.plist` 里写的 12.0 不起作用。
+  现在是 arm64 + x86_64 通用二进制，最低版本 12.0，Intel Mac 也能用了。
+- 浏览器体检桥接改为只绑 `127.0.0.1`（此前监听全部网卡）。macOS 15 起这属于
+  「本地网络」访问，未授权时浏览器连不上，浏览器组 7 项信号会整组按中性分计。
+- 双击已在运行的 macOS 实例时给出通知，指回菜单栏图标。
+- Windows 升级不再固定等 2 秒就覆盖 exe：改为等旧进程真正释放再覆盖，避免升级后
+  被单实例锁挡在门外；重复启动时弹提示指向托盘区；退出时清理托盘图标。
 
 ### v4.16（2026-09-20）
 

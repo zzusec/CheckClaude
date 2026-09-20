@@ -17,3 +17,6 @@ menubar_debug.log
 windows/*.exe
 windows/*.zip
 windows/AssemblyInfo.cs
+
+# Linux 构建产物
+linux/dist/
