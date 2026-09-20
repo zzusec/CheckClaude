@@ -153,11 +153,11 @@ browser_language_hint() {
   target=$(recommended_language "${COUNTRY:-}")
   browser="${BR_BROWSER:-浏览器}"
   case "$browser" in
-    *Chrome*) echo "打开 Chrome 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Chrome" ;;
-    *Edge*) echo "打开 Edge 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Edge" ;;
-    *Firefox*) echo "打开 Firefox 设置 → 常规 → 语言；把 ${target} 调到首位；重启 Firefox" ;;
-    *Safari*) echo "系统设置 → 通用 → 语言与地区 → 应用程序 → Safari；选择 ${target}；重开 Safari" ;;
-    *) echo "浏览器设置 → 语言；把 ${target} 调到首位；重启浏览器后重新体检" ;;
+    *Chrome*) echo "打开 Chrome 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Chrome，再点「重新体检」" ;;
+    *Edge*) echo "打开 Edge 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Edge，再点「重新体检」" ;;
+    *Firefox*) echo "打开 Firefox 设置 → 常规 → 语言；把 ${target} 调到首位；重启 Firefox，再点「重新体检」" ;;
+    *Safari*) echo "系统设置 → 通用 → 语言与地区 → 应用程序 → Safari；选择 ${target}；重开 Safari，再点「重新体检」" ;;
+    *) echo "浏览器设置 → 语言；把 ${target} 调到首位；重启浏览器后点「重新体检」" ;;
   esac
 }
 

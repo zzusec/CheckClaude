@@ -1001,7 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if scanProcess != nil {
             menu.addItem(disabled("正在检测出口…"))
         } else {
-            menu.addItem(action("立即检测", #selector(runCheck)))
+            menu.addItem(action("立即检测（不含浏览器）", #selector(runCheck)))
         }
         // 检测间隔子菜单
         let intervalMenu = NSMenu()

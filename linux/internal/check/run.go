@@ -12,7 +12,7 @@ import (
 )
 
 // Version is the CheckClaude release version.
-const Version = "4.17"
+const Version = "4.18"
 
 // CollectAll runs every collector and returns the populated Facts.
 // Local probes run first (cheap), then the exit IP is resolved, then all

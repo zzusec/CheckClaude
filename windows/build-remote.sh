@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${WIN_HOST:-win-ding}"
-VER="${1:-4.17}"
+VER="${1:-4.18}"
 REMOTE="C:/Users/hx10/checkclaude-build"
 
 echo "==> 版本 ${VER}，同步源码到 $HOST"

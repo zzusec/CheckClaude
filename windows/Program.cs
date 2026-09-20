@@ -200,6 +200,19 @@ namespace CheckClaude
         public string ActiveNic;
         // 浏览器指纹(由 BrowserBridge 采集后写文件，这里读回来)
         public bool BrOk; public string BrSource, BrTz, BrLangs, BrLocale, BrRtc, BrWebgl, BrFonts, BrChPlat, BrAccept, BrUa;
+        public int BrAgeMin = -1;                 // 这份浏览器数据采集于几分钟前，-1 表示没有
+        // 采的是系统默认浏览器，不一定是用户刚改过设置的那个，所以要把来源摆出来
+        public string BrFrom
+        {
+            get
+            {
+                if (!BrOk) return null;
+                var who = string.IsNullOrEmpty(BrUa)
+                    ? (BrSource == "browser" ? "默认浏览器" : "内置引擎")
+                    : LocalePolicy.BrowserName(BrUa);
+                return who + " · " + (BrAgeMin <= 0 ? "刚刚" : BrAgeMin + " 分钟前") + "采集";
+            }
+        }
     }
 
     static class Collector
@@ -487,9 +500,12 @@ namespace CheckClaude
         static void CollectBrowser(Facts f)
         {
             f.BrOk = false;
+            f.BrAgeMin = -1;
             var path = Path.Combine(Paths.Dir, "browser_signals");
             if (!File.Exists(path)) return;
-            if ((DateTime.Now - File.GetLastWriteTime(path)).TotalHours > 1) return;
+            var age = DateTime.Now - File.GetLastWriteTime(path);
+            if (age.TotalHours > 1) return;
+            f.BrAgeMin = age.TotalMinutes < 0 ? 0 : (int)age.TotalMinutes;
             foreach (var line in File.ReadAllLines(path))
             {
                 var i = line.IndexOf('=');
@@ -732,7 +748,7 @@ namespace CheckClaude
             if (target.StartsWith("Windows", StringComparison.Ordinal))
                 return "Windows 设置 → 时间和语言 → 语言和区域，将 " + locale
                     + " 设为首选语言；按系统提示注销或重开应用后重新体检";
-            return "浏览器设置 → 语言，将 " + locale + " 设为首选；完全退出并重开浏览器后重新体检";
+            return "浏览器设置 → 语言，将 " + locale + " 设为首选；完全退出并重开浏览器后点「重新体检（含浏览器采集）」";
         }
 
         public static string BrowserLanguageHint(string country, string ua)
@@ -741,13 +757,13 @@ namespace CheckClaude
             switch (BrowserName(ua))
             {
                 case "Google Chrome":
-                    return "Chrome 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Chrome";
+                    return "Chrome 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Chrome，再点「重新体检（含浏览器采集）」";
                 case "Microsoft Edge":
-                    return "Edge 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Edge";
+                    return "Edge 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Edge，再点「重新体检（含浏览器采集）」";
                 case "Firefox":
-                    return "Firefox 设置 → 常规 → 语言；把 " + locale + " 调到首位；重启 Firefox";
+                    return "Firefox 设置 → 常规 → 语言；把 " + locale + " 调到首位；重启 Firefox，再点「重新体检（含浏览器采集）」";
                 default:
-                    return "浏览器设置 → 语言；把 " + locale + " 调到首位；重启浏览器后重新体检";
+                    return "浏览器设置 → 语言；把 " + locale + " 调到首位；重启浏览器后点「重新体检（含浏览器采集）」";
             }
         }
     }
@@ -1046,12 +1062,12 @@ namespace CheckClaude
             if (!f.BrOk)
             {
                 // 没采集到就按中性计分，不能因为"没测"判环境有问题，也不白送满分
-                r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "菜单里点「重新体检」会自动采集");
-                r.Sig("浏览器", "浏览器时区", 3, 70, "未采集", "菜单里点「重新体检」会自动采集");
-                r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
-                r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "WebRTC 出口", 6, 70, "未采集", "菜单里点「重新体检（含浏览器采集）」会自动采集");
+                r.Sig("浏览器", "浏览器时区", 3, 70, "未采集", "菜单里点「重新体检（含浏览器采集）」会自动采集");
+                r.Sig("浏览器", "浏览器语言", 2, 70, "未采集", "菜单里点「重新体检（含浏览器采集）」会自动采集");
+                r.Sig("浏览器", "渲染环境", 2, 70, "未采集", "菜单里点「重新体检（含浏览器采集）」会自动采集");
                 r.Sig("浏览器", "Intl 区域设置", 1, 100, "未采集", null);
-                r.Sig("浏览器", "Client Hints", 2, 70, "未采集", "菜单里点「重新体检」会自动采集");
+                r.Sig("浏览器", "Client Hints", 2, 70, "未采集", "菜单里点「重新体检（含浏览器采集）」会自动采集");
                 r.Sig("浏览器", "HTTP 语言首标", 1, 100, "未采集", null);
             }
             else
@@ -1707,13 +1723,14 @@ namespace CheckClaude
                 head.DropDownItems.Add(new ToolStripSeparator());
                 head.DropDownItems.Add(Item("出口: " + (f.ProbeIp ?? "?") + " · " + (f.City ?? "") + " · " + (f.Asn ?? "?")));
                 head.DropDownItems.Add(Item("系统: " + f.SysTimezone + " · " + f.Locale + " · " + f.ProxyMode));
+                head.DropDownItems.Add(Item("浏览器画像: " + (f.BrFrom ?? "未采集（点「重新体检（含浏览器采集）」）")));
                 head.DropDownItems.Add(Item("DNS: " + f.DnsScope + " · claude.ai → " + f.DnsVerdict));
                 head.DropDownItems.Add(Item("CLI: " + (f.ClaudeVer ?? "未检测到") + " · 接口 " +
                     (string.IsNullOrEmpty(f.ClaudeBase) ? "官方" : f.ClaudeBase)));
                 m.Items.Add(head);
 
                 if (phase || fixing) m.Items.Add(Item(fixing ? "正在修复…" : "正在检测…"));
-                else m.Items.Add(Item("重新体检", (s, e) => RunCheck(true)));
+                else m.Items.Add(Item("重新体检（含浏览器采集）", (s, e) => RunCheck(true)));
                 // 始终摆在这儿；只有手动项时仍可点击查看完整方案。
                 if (fixing)
                     m.Items.Add(Item("⚡ 一键修复（执行中…）", null, false));
@@ -1738,7 +1755,7 @@ namespace CheckClaude
                     }
                     if (manual.Any(IsBrowserLanguageSignal))
                         mm.DropDownItems.Add(Item("打开浏览器语言设置", (s2, e2) => OpenBrowserLanguageSettings(r.F)));
-                    mm.DropDownItems.Add(Item("重新体检", (s2, e2) => RunCheck(true)));
+                    mm.DropDownItems.Add(Item("重新体检（含浏览器采集）", (s2, e2) => RunCheck(true)));
                     m.Items.Add(mm);
                 }
 
@@ -1755,7 +1772,8 @@ namespace CheckClaude
             }
 
             m.Items.Add(new ToolStripSeparator());
-            m.Items.Add(Item("立即检测", (s, e) => RunCheck(true, false)));
+            // 名字必须和「重新体检」分得开：这个入口不重采浏览器，改完浏览器设置点它没用
+            m.Items.Add(Item("立即检测（不含浏览器）", (s, e) => RunCheck(true, false)));
             var iv = new ToolStripMenuItem("检测间隔");
             foreach (var opt in new[] { new { L = "1 分钟", V = 60 }, new { L = "2 分钟", V = 120 },
                                         new { L = "5 分钟", V = 300 }, new { L = "10 分钟", V = 600 } })
