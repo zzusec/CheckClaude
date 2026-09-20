@@ -10,8 +10,8 @@
 #
 # 用法:
 #   ./claude-check.sh              # 体检并打印报告
-#   ./claude-check.sh --fix        # 体检 + 自动修可安全修复项(时区)，再重新打分
-#   ./claude-check.sh --fix-locale # 额外把系统"区域"改成出口国家(会影响日期格式显示)
+#   ./claude-check.sh --fix        # 体检 + 自动修安全且可恢复的项目，再重新打分
+#   ./claude-check.sh --fix-locale # --fix 的兼容别名
 #   ./claude-check.sh --quiet      # 只写状态文件，不打印
 
 set -uo pipefail
@@ -36,7 +36,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 MODE="report"; DO_FIX=0; FIX_LOCALE=0
 case "${1:-}" in
-  --fix)        DO_FIX=1 ;;
+  --fix)        DO_FIX=1; FIX_LOCALE=1 ;;
   --fix-locale) DO_FIX=1; FIX_LOCALE=1 ;;
   --quiet)      MODE="quiet" ;;
 esac
@@ -63,6 +63,103 @@ region_note() {
 }
 
 in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+normalize_lang_tag() {
+  local tag="${1%%,*}"
+  tag="${tag%%;*}"
+  tag=$(printf '%s' "$tag" | tr '_' '-' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+  printf '%s\n' "$tag"
+}
+
+lang_region() {
+  local tag part region=""
+  tag=$(normalize_lang_tag "$1")
+  IFS='-' read -ra parts <<<"$tag"
+  for part in "${parts[@]}"; do
+    [[ ${#part} -eq 2 && "$part" =~ ^[a-z][a-z]$ ]] && region=$(printf '%s' "$part" | tr '[:lower:]' '[:upper:]')
+  done
+  printf '%s\n' "$region"
+}
+
+language_variant() {
+  local tag
+  tag=$(normalize_lang_tag "$1")
+  case "$tag" in
+    zh-hant*|zh-tw*|zh-hk*|zh-mo*) echo traditional ;;
+    zh-hans*|zh-cn*|zh-sg*|zh-my*) echo simplified ;;
+    *) echo unknown ;;
+  esac
+}
+
+# IP 不能唯一决定语言。这里只把高置信冲突判成问题；英语、地区码匹配和
+# 无法可靠归类的语言都不扣“风险分”，避免把个人语言偏好当成风控事实。
+language_status() {
+  local tag country base region variant
+  tag=$(normalize_lang_tag "$1"); country=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
+  [[ -z "$tag" || -z "$country" ]] && { echo unknown; return; }
+  base="${tag%%-*}"; region=$(lang_region "$tag")
+  [[ -n "$region" && "$region" == "$country" ]] && { echo preferred; return; }
+  [[ "$base" == "en" ]] && { echo compatible; return; }
+  [[ "$base" != "zh" ]] && { echo unknown; return; }
+
+  variant=$(language_variant "$tag")
+  case "$country:$variant" in
+    TW:traditional|HK:traditional|MO:traditional|CN:simplified|SG:simplified|MY:simplified)
+      echo compatible ;;
+    TW:simplified|HK:simplified|MO:simplified|CN:traditional|SG:traditional|MY:traditional)
+      echo conflict ;;
+    *:traditional|*:simplified)
+      echo conflict ;;
+    *)
+      echo unknown ;;
+  esac
+}
+
+recommended_locale() {
+  case "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" in
+    US) echo en-US ;; CA) echo en-CA ;; GB) echo en-GB ;; IE) echo en-IE ;;
+    DE) echo de-DE ;; FR) echo fr-FR ;; NL) echo nl-NL ;; SE) echo sv-SE ;;
+    NO) echo nb-NO ;; DK) echo da-DK ;; FI) echo fi-FI ;; IT) echo it-IT ;;
+    ES) echo es-ES ;; PT) echo pt-PT ;; PL) echo pl-PL ;; CZ) echo cs-CZ ;;
+    AT) echo de-AT ;; CH) echo de-CH ;; BE) echo nl-BE ;; LU) echo fr-LU ;;
+    JP) echo ja-JP ;; KR) echo ko-KR ;; SG) echo en-SG ;; TW) echo zh-TW ;;
+    AU) echo en-AU ;; NZ) echo en-NZ ;; IL) echo he-IL ;; AE) echo ar-AE ;;
+    MX) echo es-MX ;; BR) echo pt-BR ;; IN) echo en-IN ;; PH) echo en-PH ;;
+    TH) echo th-TH ;; MY) echo ms-MY ;; ID) echo id-ID ;; VN) echo vi-VN ;;
+    ZA) echo en-ZA ;; TR) echo tr-TR ;; SA) echo ar-SA ;; AR) echo es-AR ;;
+    CL) echo es-CL ;; CN) echo zh-CN ;; HK) echo zh-HK ;; MO) echo zh-Hant-MO ;;
+    *) echo en-US ;;
+  esac
+}
+
+recommended_language() {
+  case "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')" in
+    TW) echo zh-TW ;; HK) echo zh-HK ;; MO) echo zh-Hant-MO ;;
+    CN) echo zh-CN ;; SG) echo zh-SG ;; MY) echo zh-MY ;;
+    *) recommended_locale "$1" ;;
+  esac
+}
+
+language_conflict_text() {
+  case "$(language_variant "$1")" in
+    traditional) echo 繁体中文 ;;
+    simplified) echo 简体中文 ;;
+    *) echo "语言 $(normalize_lang_tag "$1")" ;;
+  esac
+}
+
+browser_language_hint() {
+  local target browser
+  target=$(recommended_language "${COUNTRY:-}")
+  browser="${BR_BROWSER:-浏览器}"
+  case "$browser" in
+    *Chrome*) echo "打开 Chrome 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Chrome" ;;
+    *Edge*) echo "打开 Edge 设置 → 语言；添加 ${target} 并移到首位；完全退出后重开 Edge" ;;
+    *Firefox*) echo "打开 Firefox 设置 → 常规 → 语言；把 ${target} 调到首位；重启 Firefox" ;;
+    *Safari*) echo "系统设置 → 通用 → 语言与地区 → 应用程序 → Safari；选择 ${target}；重开 Safari" ;;
+    *) echo "浏览器设置 → 语言；把 ${target} 调到首位；重启浏览器后重新体检" ;;
+  esac
+}
 
 # ── 信号表 ──────────────────────────────────────────────────────
 # 加一项检测 = 调一次 sig。字段用 ~ 分隔(| 留给 issues/fixes 的多条分隔)
@@ -326,7 +423,7 @@ parse_browser() {
   BR_OK=0; BR_TZ=""; BR_LANGS=""; BR_LOCALE=""; BR_RTC=""; BR_RTC_HOST=""
   BR_RTC_STATUS=""; BR_RTC_SUPPORTED=""; BR_RTC_CANDIDATES=""; BR_RTC_PUBLIC_COUNT=""
   BR_RTC_MS=""; BR_RTC_ERROR=""
-  BR_SOURCE=""; BR_UA=""; BR_UA_JS=""; BR_CH_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""
+  BR_SOURCE=""; BR_BROWSER=""; BR_UA=""; BR_UA_JS=""; BR_CH_UA=""; BR_CH_PLAT=""; BR_ACCEPT=""
   BR_UAD_PLAT=""; BR_UAD_BRANDS=""; BR_SF_SITE=""; BR_SF_MODE=""; BR_SF_DEST=""
   BR_REACH_ANTHROPIC=""; BR_REACH_ANTHROPIC_MS=""
   BR_REACH_API=""; BR_REACH_API_MS=""
@@ -337,7 +434,7 @@ parse_browser() {
   while IFS='=' read -r k v; do
     case "$k" in
       tz) BR_TZ="$v" ;; languages) BR_LANGS="$v" ;; locale) BR_LOCALE="$v" ;;
-      source) BR_SOURCE="$v" ;; ua) BR_UA="$v" ;; ua_js) BR_UA_JS="$v" ;;
+      source) BR_SOURCE="$v" ;; browser_name) BR_BROWSER="$v" ;; ua) BR_UA="$v" ;; ua_js) BR_UA_JS="$v" ;;
       ch_ua) BR_CH_UA="$v" ;; ch_platform) BR_CH_PLAT="$v" ;; accept_lang) BR_ACCEPT="$v" ;;
       uad_platform) BR_UAD_PLAT="$v" ;; uad_brands) BR_UAD_BRANDS="$v" ;;
       sf_site) BR_SF_SITE="$v" ;; sf_mode) BR_SF_MODE="$v" ;; sf_dest) BR_SF_DEST="$v" ;;
@@ -393,7 +490,8 @@ classify_risk() {
 
 # ── 打分: 26 项加权信号，合计 100 ───────────────────────────────
 compute_score() {
-  SIGNALS=(); SCORE=0; ISSUES=""; FIXES=""; FIXABLE_TZ=""; FIXABLE_LOCALE=""
+  SIGNALS=(); SCORE=0; ISSUES=""; FIXES=""; FIXABLE_TZ=""; FIXABLE_LOCALE=""; FIXABLE_LOCALE_TARGET=""
+  COUNTRY_CONFIRMED=0
   BR_HEADER_INTEGRITY="unknown"
   local relay=0
   [[ -n "$CLAUDE_BASE" && "$CLAUDE_BASE" != *"api.anthropic.com"* ]] && relay=1
@@ -454,6 +552,7 @@ compute_score() {
   done
   [[ -n "$intel_codes" ]] && intel_unique=$(printf '%s\n' "$intel_codes" | sort -u | grep -c . | tr -d ' ')
   if [[ $intel_count -ge 2 && $intel_unique -eq 1 ]]; then
+    [[ -n "$COUNTRY" ]] && COUNTRY_CONFIRMED=1
     if [[ "${ASN_MATCH:--1}" == "0" ]]; then
       # 国家码一致但 ASN 归属分歧，风控按不同库判会得到不同结论，不能算"完全一致"
       sig 出口 "多源情报一致" 3 50 "${intel_count}/4 · ${intel_display%% / *} · ASN 分歧" \
@@ -539,9 +638,14 @@ compute_score() {
   elif [[ -z "$GFW_TZ" || "$GFW_TZ" == "?" ]]; then
     sig 画像 "系统时区匹配出口" 5 50 "出口时区未知" "无法解析出口 IP 对应时区"
   else
-    sig 画像 "系统时区匹配出口" 5 0 "$SYS_TZ ≠ $GFW_TZ" \
-      "系统时区 ${SYS_TZ} 与出口时区 ${GFW_TZ} 不一致，是典型的环境矛盾信号" "可一键修复: 把系统时区改为 ${GFW_TZ}"
-    FIXABLE_TZ="$GFW_TZ"
+    if [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; then
+      sig 画像 "系统时区匹配出口" 5 0 "$SYS_TZ ≠ $GFW_TZ" \
+        "系统时区 ${SYS_TZ} 与不支持地区出口时区 ${GFW_TZ} 不一致" "先换到支持地区且归属明确的节点，再按新出口修复时区"
+    else
+      sig 画像 "系统时区匹配出口" 5 0 "$SYS_TZ ≠ $GFW_TZ" \
+        "系统时区 ${SYS_TZ} 与出口时区 ${GFW_TZ} 不一致，是典型的环境矛盾信号" "可一键修复: 把系统时区改为 ${GFW_TZ}"
+      FIXABLE_TZ="$GFW_TZ"
+    fi
   fi
 
   if [[ "$TZ_SELF_CONSISTENT" == "1" ]]; then
@@ -555,14 +659,24 @@ compute_score() {
     sig 画像 "系统区域匹配出口" 4 50 "数据不足"
   elif [[ "$LOCALE_CC" == "$COUNTRY" ]]; then
     sig 画像 "系统区域匹配出口" 4 100 "$SYS_LOCALE"
+  elif [[ -n "$COUNTRY" ]] && in_list "$COUNTRY" "$UNSUPPORTED"; then
+    sig 画像 "系统区域匹配出口" 4 50 "$SYS_LOCALE vs $COUNTRY" \
+      "系统区域 ${LOCALE_CC:-?} 与不支持地区出口 ${COUNTRY} 不一致" \
+      "先换到支持地区且归属明确的节点，不自动跟随当前出口修改系统区域"
+  elif [[ "$COUNTRY_CONFIRMED" != "1" ]]; then
+    sig 画像 "系统区域匹配出口" 4 50 "$SYS_LOCALE vs $COUNTRY" \
+      "系统区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致，但多个 IP 情报源对归属有分歧" \
+      "换归属明确的节点或重新体检；国家码一致前不自动修改系统区域"
   elif [[ "$SYS_LANG" == zh* ]]; then
     sig 画像 "系统区域匹配出口" 4 50 "$SYS_LOCALE vs $COUNTRY" \
       "系统语言中文 + 区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致(网页端登录会暴露矛盾)" \
-      "仅用 Claude Code(CLI) 可忽略；常用网页端可把系统区域改成 ${COUNTRY}(不用改显示语言)"
-    FIXABLE_LOCALE="$COUNTRY"
+      "点一键修复把系统区域改成 ${COUNTRY}，不会改显示语言"
+    FIXABLE_LOCALE="$COUNTRY"; FIXABLE_LOCALE_TARGET="${SYS_LOCALE%%_*}_${COUNTRY}"
   else
-    sig 画像 "系统区域匹配出口" 4 70 "$SYS_LOCALE vs $COUNTRY" "系统区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致"
-    FIXABLE_LOCALE="$COUNTRY"
+    sig 画像 "系统区域匹配出口" 4 70 "$SYS_LOCALE vs $COUNTRY" \
+      "系统区域 ${LOCALE_CC:-?} 与出口 ${COUNTRY} 不一致" \
+      "点一键修复把系统区域改成 ${COUNTRY}，不会改显示语言"
+    FIXABLE_LOCALE="$COUNTRY"; FIXABLE_LOCALE_TARGET="${SYS_LOCALE%%_*}_${COUNTRY}"
   fi
 
   # ── D. DNS (10) ──
@@ -597,23 +711,17 @@ compute_score() {
   esac
 
   # ── E. 环境稳定性 / 运行容器 (10) ──
-  # 简体/繁体与出口地区的对应关系: 繁体主要用于 TW/HK/MO，简体用于 CN/SG
-  # 系统用繁体却从美国出口，或用简体却从台湾出口，都是地区画像里的矛盾信号
-  local variant=""
-  case "$SYS_LANGS" in
-    *zh-Hant*|*zh-TW*|*zh-HK*|*zh-MO*) variant="繁体" ;;
-    *zh-Hans*|*zh-CN*|*zh-SG*|zh*)     variant="简体" ;;
-  esac
-  if [[ -z "$variant" || -z "$COUNTRY" ]]; then
-    sig 画像 "语言变体一致" 2 100 "${variant:-非中文}"
-  elif [[ "$variant" == "繁体" ]] && in_list "$COUNTRY" "TW HK MO"; then
-    sig 画像 "语言变体一致" 2 100 "繁体 · $COUNTRY"
-  elif [[ "$variant" == "简体" ]] && in_list "$COUNTRY" "CN SG MY"; then
-    sig 画像 "语言变体一致" 2 100 "简体 · $COUNTRY"
+  # 只检查首选语言，不让后续备用语言覆盖真实首选项。英语全球兼容；
+  # 其它语言无法可靠由 IP 推导时保持中性，只对高置信中文变体冲突扣分。
+  local sys_first="${SYS_LANGS%%,*}" sys_lang_status sys_lang_desc
+  sys_lang_status=$(language_status "$sys_first" "${COUNTRY:-}")
+  sys_lang_desc=$(language_conflict_text "$sys_first")
+  if [[ "$sys_lang_status" == "conflict" ]]; then
+    sig 画像 "语言变体一致" 2 50 "$sys_first vs $COUNTRY" \
+      "系统首选语言是${sys_lang_desc}，与出口 ${COUNTRY} 的地区画像不对应" \
+      "仅用 CLI 可忽略；网页端可在系统语言设置中把 $(recommended_language "$COUNTRY") 调到首位"
   else
-    sig 画像 "语言变体一致" 2 50 "$variant vs $COUNTRY" \
-      "系统用${variant}中文但出口在 ${COUNTRY}，语言变体与地区画像不对应" \
-      "仅用 CLI 可忽略；网页端登录前可把首选语言调成 en-US"
+    sig 画像 "语言变体一致" 2 100 "${sys_first:-未识别} · ${COUNTRY:-?}"
   fi
 
   if [[ "$PAC_ON" == "1" ]]; then
@@ -697,23 +805,30 @@ compute_score() {
         "浏览器时区 ${BR_TZ} 与系统时区 ${SYS_TZ} 不一致" "重启浏览器让它重新读系统时区"
     fi
 
-    # 浏览器语言是网页端最直接的地区信号: 中文 + 国外出口是最常见的矛盾组合
-    if [[ -n "$COUNTRY" && "$BR_LANGS" == zh* && ! " $UNSUPPORTED " == *" $COUNTRY "* ]]; then
+    # 浏览器语言是网页端的直接信号，但 IP 不能唯一决定语言。英语全球兼容；
+    # 地区码相同直接通过；只有可可靠识别的中文简繁变体冲突才扣分。
+    local br_lang_status br_lang_desc
+    br_lang_status=$(language_status "$BR_LANGS" "${COUNTRY:-}")
+    br_lang_desc=$(language_conflict_text "$BR_LANGS")
+    if [[ "$br_lang_status" == "conflict" ]]; then
       sig 浏览器 "浏览器语言" 2 40 "$BR_LANGS vs $COUNTRY" \
-        "浏览器语言 ${BR_LANGS} 与出口地区 ${COUNTRY} 矛盾(网页端登录时直接可见)" \
-        "网页端登录前把浏览器首选语言调成 en-US"
+        "浏览器首选语言是${br_lang_desc}，与出口地区 ${COUNTRY} 矛盾(网页端登录时直接可见)" \
+        "$(browser_language_hint)"
     else
       sig 浏览器 "浏览器语言" 2 100 "${BR_LANGS:-?}"
     fi
 
-    # Intl 区域设置: 浏览器国际化配置与出口地区是否对应
+    # Intl locale 通常跟随浏览器首选语言。英语和无法可靠归类的语言保持中性，
+    # 避免把 en-US + 台湾出口这类常见组合误判为风险。
+    local br_locale_status
+    br_locale_status=$(language_status "$BR_LOCALE" "${COUNTRY:-}")
     if [[ -z "$BR_LOCALE" || -z "$COUNTRY" ]]; then
       sig 浏览器 "Intl 区域设置" 1 100 "${BR_LOCALE:-?}"
-    elif [[ "$BR_LOCALE" == *"-$COUNTRY" ]]; then
-      sig 浏览器 "Intl 区域设置" 1 100 "$BR_LOCALE"
-    else
+    elif [[ "$br_locale_status" == "conflict" ]]; then
       sig 浏览器 "Intl 区域设置" 1 50 "$BR_LOCALE vs $COUNTRY" \
-        "浏览器 Intl 区域 ${BR_LOCALE} 与出口 ${COUNTRY} 不对应"
+        "浏览器 Intl 区域 ${BR_LOCALE} 与出口 ${COUNTRY} 明显冲突" "$(browser_language_hint)"
+    else
+      sig 浏览器 "Intl 区域设置" 1 100 "$BR_LOCALE"
     fi
 
     # 请求头完整性：把服务端实际收到的 UA / Accept-Language / Client Hints
@@ -750,17 +865,18 @@ compute_score() {
 
     # HTTP Accept-Language 是服务端最先看到的语言；先与 JS navigator.languages
     # 交叉核对，再检查是否与出口国家明显冲突。
-    local accept_first="${BR_ACCEPT%%,*}" js_first="${BR_LANGS%%,*}" accept_base js_base
+    local accept_first="${BR_ACCEPT%%,*}" js_first="${BR_LANGS%%,*}" accept_norm js_norm accept_status
     accept_first="${accept_first%%;*}"
-    accept_base=$(printf '%s' "${accept_first%%-*}" | tr '[:upper:]' '[:lower:]')
-    js_base=$(printf '%s' "${js_first%%-*}" | tr '[:upper:]' '[:lower:]')
+    accept_norm=$(normalize_lang_tag "$accept_first")
+    js_norm=$(normalize_lang_tag "$js_first")
+    accept_status=$(language_status "$accept_first" "${COUNTRY:-}")
     if [[ "$BR_SOURCE" != "browser" || -z "$BR_ACCEPT" ]]; then
       sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:-未采集}"
-    elif [[ -n "$accept_base" && -n "$js_base" && "$accept_base" != "$js_base" ]]; then
+    elif [[ -n "$accept_norm" && -n "$js_norm" && "$accept_norm" != "$js_norm" ]]; then
       BR_HEADER_INTEGRITY="conflict"
       sig 浏览器 "HTTP 语言首标" 1 0 "$accept_first ≠ $js_first"         "HTTP Accept-Language 与 navigator.languages 首选语言不一致，浏览器画像存在矛盾"         "统一浏览器首选语言，并关闭修改请求头的扩展"
-    elif [[ -n "$COUNTRY" && "$BR_ACCEPT" == zh* ]] && ! in_list "$COUNTRY" "CN HK TW MO SG"; then
-      sig 浏览器 "HTTP 语言首标" 1 0 "$BR_ACCEPT vs $COUNTRY"         "请求头 Accept-Language: ${BR_ACCEPT} 与出口 ${COUNTRY} 矛盾，服务端第一眼就能看到"         "浏览器设置里把首选语言调成 English (United States)"
+    elif [[ "$accept_status" == "conflict" ]]; then
+      sig 浏览器 "HTTP 语言首标" 1 0 "$BR_ACCEPT vs $COUNTRY"         "请求头 Accept-Language: ${BR_ACCEPT} 与出口 ${COUNTRY} 明显冲突，服务端第一眼就能看到"         "$(browser_language_hint)"
     else
       sig 浏览器 "HTTP 语言首标" 1 100 "${BR_ACCEPT:0:24}"
     fi
@@ -837,7 +953,10 @@ gain_hint() {
     "三路出口一致")      echo "代理切全局模式" ;;
     "系统时区匹配出口")  echo "点「一键修复」" ;;
     "时区偏移自洽")      echo "清掉 TZ 变量后重开终端" ;;
-    "系统区域匹配出口")  echo "点「把系统区域改为 XX」" ;;
+    "系统区域匹配出口")
+      if [[ -n "${FIXABLE_LOCALE:-}" ]]; then echo "点「一键修复」改为 ${FIXABLE_LOCALE_TARGET:-${COUNTRY:-对应地区}}"
+      else echo "先固定归属明确的支持地区节点，再重新体检"
+      fi ;;
     "代理形态")
       if [[ "$PAC_ON" == "1" ]]; then echo "点「一键修复」关 PAC，再开 TUN"
       elif [[ "$CONSISTENT" == "1" && "$CF_IP" == "$PROBE_IP" ]]; then echo "代理在网关上可忽略，否则开 TUN"
@@ -853,14 +972,14 @@ gain_hint() {
       fi ;;
     "WebRTC 出口")       echo "代理开 TUN 接管 UDP" ;;
     "浏览器时区")        echo "重启浏览器" ;;
-    "浏览器语言")        echo "浏览器语言调成 en-US" ;;
+    "浏览器语言")        browser_language_hint ;;
     "渲染环境")          echo "从菜单栏 App 体检" ;;
     "anthropic.com 可达") echo "开全局代理；持续 403 换节点" ;;
     "IPv6 出口")         echo "代理接管 IPv6，或系统关闭 IPv6" ;;
-    "语言变体一致")      echo "首选语言拖成 English" ;;
-    "Intl 区域设置")     echo "浏览器语言/区域跟出口一致" ;;
+    "语言变体一致")      echo "系统设置 → 通用 → 语言与地区；把 $(recommended_language "${COUNTRY:-}") 调到首位；重开相关 App" ;;
+    "Intl 区域设置")     browser_language_hint ;;
     "Client Hints")      echo "关掉改 UA 的插件" ;;
-    "HTTP 语言首标")     echo "浏览器语言首位设 English" ;;
+    "HTTP 语言首标")     browser_language_hint ;;
     *)                   echo "重新体检" ;;
   esac
 }
@@ -982,7 +1101,7 @@ PLIST
 
 apply_fixes() {
   local done_any=0 svc
-  AUTO_FIXED_ITEMS=""
+  AUTO_FIXED_ITEMS=""; FIX_RESULTS=""; FIX_ERRORS=""
   svc=$(active_service)
 
   # 1. 时区(无副作用，靠已配的免密 sudo)
@@ -994,8 +1113,11 @@ apply_fixes() {
     if [[ "$SYS_TZ" == "$FIXABLE_TZ" ]]; then
       echo "  ✅ 已改为 $SYS_TZ"; log "fix: 时区 -> $SYS_TZ"; done_any=1
       AUTO_FIXED_ITEMS+="|系统时区匹配出口|"
+      FIX_RESULTS+="${FIX_RESULTS:+；}时区：已改为 $SYS_TZ"
+      FIX_RESTART_PENDING=1
     else
       echo "  ⚠️  失败，需先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
+      FIX_ERRORS+="${FIX_ERRORS:+；}时区：缺少授权或系统拒绝修改"
     fi
   fi
 
@@ -1006,8 +1128,10 @@ apply_fixes() {
       echo "  ✅ 已关闭(撤销: networksetup -setautoproxystate \"$svc\" on)"
       log "fix: 关闭 PAC ($svc)"; PAC_ON=0; PROXY_MODE="${PROXY_MODE% + PAC 分流}"; done_any=1
       AUTO_FIXED_ITEMS+="|代理形态|"
+      FIX_RESULTS+="${FIX_RESULTS:+；}PAC：已关闭 $svc 的自动分流"
     else
       echo "  ⚠️  需要授权，先运行一次: sudo bash enable-auto-timezone.sh"; NEED_SUDO=1
+      FIX_ERRORS+="${FIX_ERRORS:+；}PAC：缺少授权或系统拒绝修改"
     fi
   fi
 
@@ -1016,20 +1140,36 @@ apply_fixes() {
     echo "→ 修复 DNS 泄漏 (当前 $DNS_SCOPE)"
     if [[ -n "$svc" ]] && fix_dns_servers "$svc"; then
       done_any=1; AUTO_FIXED_ITEMS+="|DNS 出口|"
+      FIX_RESULTS+="${FIX_RESULTS:+；}DNS：已换成验证通过的公共 DNS"
     elif [[ -z "$svc" ]]; then
       echo "  ⚠️  找不到活跃网络服务"
+      FIX_ERRORS+="${FIX_ERRORS:+；}DNS：找不到活跃网络服务"
+    else
+      FIX_ERRORS+="${FIX_ERRORS:+；}DNS：公共 DNS 未通过验证或修改失败，按手动步骤处理"
     fi
   fi
 
-  # 4. 系统区域(会影响日期格式显示，需显式 --fix-locale)
+  # 4. 系统区域只改日期/数字等格式，不改显示语言或 AppleLanguages。
   if [[ $FIX_LOCALE -eq 1 && -n "${FIXABLE_LOCALE:-}" ]]; then
-    local lang="${SYS_LOCALE%%_*}"
-    echo "→ 修复系统区域: $SYS_LOCALE -> ${lang}_${FIXABLE_LOCALE}"
-    defaults write -g AppleLocale "${lang}_${FIXABLE_LOCALE}" 2>/dev/null \
-      && { echo "  ✅ 已改(重开 App 生效，撤销: defaults write -g AppleLocale $SYS_LOCALE)"; done_any=1; }
-    SYS_LOCALE="${lang}_${FIXABLE_LOCALE}"; LOCALE_CC="$FIXABLE_LOCALE"
+    local old_locale="$SYS_LOCALE" target_locale="${FIXABLE_LOCALE_TARGET:-${SYS_LOCALE%%_*}_${FIXABLE_LOCALE}}" actual_locale
+    echo "→ 修复系统区域: $old_locale -> $target_locale"
+    printf '%s\n' "$old_locale" >"$DATA_DIR/locale_backup" 2>/dev/null || true
+    if defaults write -g AppleLocale "$target_locale" 2>/dev/null; then
+      actual_locale=$(defaults read -g AppleLocale 2>/dev/null || true)
+      if [[ "$actual_locale" == "$target_locale" ]]; then
+        echo "  ✅ 已改(重开 App 生效，撤销: defaults write -g AppleLocale '$old_locale')"
+        done_any=1; AUTO_FIXED_ITEMS+="|系统区域匹配出口|"
+        FIX_RESULTS+="${FIX_RESULTS:+；}系统区域：$old_locale → $target_locale（重开 App 生效）"
+        FIX_RESTART_PENDING=1
+        SYS_LOCALE="$target_locale"; LOCALE_CC="$FIXABLE_LOCALE"
+      else
+        FIX_ERRORS+="${FIX_ERRORS:+；}系统区域：系统没有接受目标值 $target_locale"
+      fi
+    else
+      FIX_ERRORS+="${FIX_ERRORS:+；}系统区域：写入 $target_locale 失败"
+    fi
   elif [[ -n "${FIXABLE_LOCALE:-}" ]]; then
-    echo "→ 系统区域与出口不一致，改它会影响日期格式显示，需显式确认: ./claude-check.sh --fix-locale"
+    FIX_ERRORS+="${FIX_ERRORS:+；}系统区域：需要从菜单的一键修复确认后修改"
   fi
 
   if [[ $done_any -eq 0 ]]; then
@@ -1063,15 +1203,18 @@ show_manual_guide() {
   local tail_note="${nl}（这些步骤随时可以在菜单栏 →「📋 手动处理步骤」里翻到，不用记）"
   local head="已自动修复的部分完成。还有 ${n} 项需要你手动处理："
   [[ $auto_done -eq 0 ]] && head="有 ${n} 项需要你手动处理（这些无法自动完成）："
-  osascript -e "display dialog \"${head}${nl}${nl}${body}${tail_note}\" buttons {\"知道了\"} default button 1 with title \"CheckClaude 修复指引\" with icon note" >/dev/null 2>&1 &
+  if [[ "${CHECKCLAUDE_GUI:-0}" != "1" ]]; then
+    osascript -e "display dialog \"${head}${nl}${nl}${body}${tail_note}\" buttons {\"知道了\"} default button 1 with title \"CheckClaude 修复指引\" with icon note" >/dev/null 2>&1 &
+  fi
 }
 
 # 有哪些项能自动修 —— 菜单栏据此决定是否亮"一键修复"
 fixable_list() {
   local l=""
   [[ -n "${FIXABLE_TZ:-}" ]] && l+="${l:+、}时区"
+  [[ -n "${FIXABLE_LOCALE:-}" ]] && l+="${l:+、}系统区域"
   [[ "${PAC_ON:-0}" == "1" ]] && l+="${l:+、}关PAC分流"
-  [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]] && l+="${l:+、}DNS加密"
+  [[ "$DNS_SCOPE" == 国内公共DNS* || "$DNS_VERDICT" == 被污染* ]] && l+="${l:+、}DNS 设置"
   echo "$l"
 }
 
@@ -1093,9 +1236,10 @@ write_cstatus() {
     echo "ipv6=${IPV6:-无}"; echo "ipv6country=${IPV6_CC:-?}"
     echo "consistent=${CONSISTENT}"; echo "systz=${SYS_TZ}"; echo "iptz=${GFW_TZ:-?}"
     echo "tzoffset=${TZ_OFFSET} ${TZ_ABBR}"; echo "locale=${SYS_LOCALE:-?}"; echo "langs=${SYS_LANGS:-?}"
+    echo "countryconfirmed=${COUNTRY_CONFIRMED:-0}"; echo "fixlocale=${FIXABLE_LOCALE_TARGET:-}"
     echo "os=${OS_VER}"; echo "proxymode=${PROXY_MODE}"
     echo "vmhost=${VM_HOST}"; echo "ipchanges=${IP_CHANGES}"
-    echo "brtz=${BR_TZ:-未采集}"; echo "brlangs=${BR_LANGS:-未采集}"
+    echo "brtz=${BR_TZ:-未采集}"; echo "brlangs=${BR_LANGS:-未采集}"; echo "brbrowser=${BR_BROWSER:-未知浏览器}"
     echo "brrtc=${BR_RTC:-无}"; echo "brrtcstatus=${BR_RTC_STATUS:-未采集}"
     echo "brrtccandidates=${BR_RTC_CANDIDATES:-0}"; echo "brrtcpublic=${BR_RTC_PUBLIC_COUNT:-0}"
     echo "brrtcms=${BR_RTC_MS:-}"; echo "brfonts=${BR_FONTS:-?}"; echo "brwebgl=${BR_WEBGL:-?}"
@@ -1109,6 +1253,8 @@ write_cstatus() {
     echo "fixable=$( [[ -n "$(fixable_list)" ]] && echo 1 || echo 0 )"
     echo "fixlist=$(fixable_list)"
     echo "needsudo=${NEED_SUDO:-0}"
+    echo "fixresults=${FIX_RESULTS:-}"; echo "fixerrors=${FIX_ERRORS:-}"
+    echo "restartpending=${FIX_RESTART_PENDING:-0}"
     echo "signals=$(IFS=';'; echo "${SIGNALS[*]}")"
     echo "gains=$GAINS"
     echo "issues=$ISSUES"; echo "fixes=$FIXES"
@@ -1193,6 +1339,7 @@ print_report() {
 }
 
 main() {
+  FIX_RESULTS=""; FIX_ERRORS=""; FIX_RESTART_PENDING=0
   refresh_base
   fetch_all
   parse_net

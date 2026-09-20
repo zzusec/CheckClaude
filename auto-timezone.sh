@@ -39,6 +39,7 @@ LOCK_DIR="$DATA_DIR/scan.lock"        # mkdir 原子锁，避免多个检测任�
 CONFIRM_REQUIRED=2
 LOCK_TTL=180
 HISTORY_WINDOW=86400
+UNSUPPORTED_COUNTRIES="CN HK MO RU IR KP CU SY BY VE"
 
 MODE="run"
 case "${1:-}" in
@@ -68,6 +69,7 @@ notify() {
 }
 
 is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # 状态快照必须先完整写到同目录临时文件，再原子替换；菜单栏不会读到半截内容。
 write_status() {
@@ -364,6 +366,19 @@ ip_timezone() {
   return 1
 }
 
+# 只用于阻止后台跟随明确不支持的出口修改系统时区。接口不可达时保持原行为，
+# 不因单个国家情报源失败而阻断已经确认的时区同步。
+ip_country() {
+  local ip="$1" cc
+  cc=$($CURL "https://ipinfo.io/${ip}/country" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] && { echo "$cc"; return 0; }
+  cc=$($CURL "https://ipwho.is/${ip}?fields=country_code" 2>/dev/null \
+    | grep -Eo '"country_code"[[:space:]]*:[[:space:]]*"[A-Za-z]{2}"' \
+    | grep -Eo '[A-Za-z]{2}"$' | tr -d '"' | tr '[:lower:]' '[:upper:]')
+  [[ "$cc" =~ ^[A-Z]{2}$ ]] && { echo "$cc"; return 0; }
+  return 1
+}
+
 apply_timezone() {
   local target current
   target="$1"
@@ -438,7 +453,7 @@ confirm_timezone_candidate() {
 # 谷歌侧出口独立于国内/国外辅助探针确认。这样即使辅助接口波动，只要实际
 # Claude/Google 路径连续两次确认，系统时区仍会自动修正并在以后每轮防漂移。
 sync_timezone_from_gfw() {
-  local candidate_ip="$1" previous_ip="$TIMEZONE_IP" raw_timezone="" target_timezone=""
+  local candidate_ip="$1" previous_ip="$TIMEZONE_IP" raw_timezone="" target_timezone="" country=""
   is_ipv4 "$candidate_ip" || return 1
 
   if [[ -n "$previous_ip" && "$candidate_ip" != "$previous_ip" ]]; then
@@ -479,6 +494,13 @@ sync_timezone_from_gfw() {
   PENDING_TIMEZONE_IP=""
   PENDING_TIMEZONE_IP_COUNT=0
   log "  时区权威出口 ${TIMEZONE_IP} 对应 IANA 时区: ${target_timezone}"
+
+  country=$(ip_country "$candidate_ip") || country=""
+  if [[ -n "$country" ]] && in_list "$country" "$UNSUPPORTED_COUNTRIES"; then
+    TIMEZONE_DETAIL="出口国家 ${country} 不支持 Claude，仅展示对应时区 ${target_timezone}，不自动修改"
+    log "  出口国家 ${country} 不支持 Claude，跳过系统时区自动修改"
+    return 0
+  fi
 
   if [[ "$MODE" != "check" ]]; then
     apply_timezone "$target_timezone" || true

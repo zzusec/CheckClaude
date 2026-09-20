@@ -46,12 +46,12 @@ printf '%s\n' '④ 登录启动但用户退出后不再被 KeepAlive 拉起'
 check "保留 RunAtLoad" "$(plutil -extract RunAtLoad raw "$ROOT/menubar/com.example.checkclaude.plist")" true
 if plutil -extract KeepAlive raw "$ROOT/menubar/com.example.checkclaude.plist" >/dev/null 2>&1; then keepalive=yes; else keepalive=no; fi
 check "移除 KeepAlive" "$keepalive" no
-check "构建版本为 4.15" "$(sed -n 's/.*CFBundleShortVersionString.*<string>\([^<]*\)<.*/\1/p' "$ROOT/menubar/build.sh")" 4.15
+check "构建版本为 4.16" "$(sed -n 's/.*CFBundleShortVersionString.*<string>\([^<]*\)<.*/\1/p' "$ROOT/menubar/build.sh")" 4.16
 
 printf '%s\n' '⑤ 双位小版本号语义比较正确'
-MOCK_CURRENT=4.14; MOCK_LATEST=4.15; MOCK_FAIL=0
+MOCK_CURRENT=4.15; MOCK_LATEST=4.16; MOCK_FAIL=0
 do_check >/dev/null
-check "4.14 能识别 4.15 更新" "$(value "$USTATUS" hasupdate)/$(value "$USTATUS" latest)" "1/4.15"
+check "4.15 能识别 4.16 更新" "$(value "$USTATUS" hasupdate)/$(value "$USTATUS" latest)" "1/4.16"
 
 printf '\n'
 [[ $FAIL -eq 0 ]] && echo "全部通过" || { echo "存在失败"; exit 1; }

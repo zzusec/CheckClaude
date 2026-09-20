@@ -174,6 +174,46 @@ lang_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p _ <<<"$r"; [[
 check "语言头冲突得 0 分" "$lang_points" 0
 check "语言头冲突给出问题" "$(echo "$ISSUES" | grep -c 'Accept-Language 与 navigator.languages' || true)" 1
 
+echo "㉑-A 台湾繁体中文画像完整匹配 => 100 分且不建议英文"
+base_signals
+COUNTRY=TW; COUNTRY2=TW; COUNTRY3=TW; COUNTRY4=TW; COUNTRY_NAME=台湾; CITY=Taipei
+CF_LOC=TW; SYS_TZ=Asia/Taipei; GFW_TZ=Asia/Taipei; SYS_LOCALE=zh_TW; SYS_LANG=zh; SYS_LANGS=zh-TW,en-US; LOCALE_CC=TW
+BR_TZ=Asia/Taipei; BR_LANGS=zh-TW,en-US; BR_LOCALE=zh-TW; BR_ACCEPT=zh-TW,zh
+compute_score
+check "台湾匹配满分" "$SCORE" 100
+check "台湾不再要求英文" "$(printf '%s|%s' "$ISSUES" "$FIXES" | grep -ci 'en-US\|English' || true)" 0
+
+echo "㉑-B 台湾出口使用英语 => 兼容且不扣风险分"
+BR_LANGS=en-US,en; BR_LOCALE=en-US; BR_ACCEPT=en-US,en; compute_score
+check "台湾英语兼容" "$SCORE" 100
+
+echo "㉑-C 台湾出口使用简体中文 => 推荐 zh-TW 而不是英文"
+BR_LANGS=zh-CN,zh; BR_LOCALE=zh-CN; BR_ACCEPT=zh-CN,zh; compute_score
+check "台湾简体浏览器被识别" "$(echo "$ISSUES" | grep -c '简体.*TW\|zh-CN.*TW' || true)" 1
+check "台湾冲突建议 zh-TW" "$(echo "$FIXES" | grep -c 'zh-TW' || true)" 1
+check "台湾冲突不建议英文" "$(echo "$FIXES" | grep -ci 'en-US\|English' || true)" 0
+
+echo "㉑-D 同为中文但地区变体不同 => HTTP 与 JavaScript 仍算冲突"
+BR_LANGS=zh-TW,zh; BR_LOCALE=zh-TW; BR_ACCEPT=zh-CN,zh; compute_score
+lang_points=$(for r in "${SIGNALS[@]}"; do IFS='~' read -r _ l _ p _ <<<"$r"; [[ $l == 'HTTP 语言首标' ]] && echo "$p"; done)
+check "中文变体请求头冲突得 0 分" "$lang_points" 0
+
+echo "㉑-E 系统区域只在支持地区且多源国家一致时允许自动修复"
+base_signals; SYS_LOCALE=zh_CN; SYS_LANG=zh; SYS_LANGS=zh-CN; LOCALE_CC=CN; compute_score
+check "一致情报允许修系统区域" "$FIXABLE_LOCALE" US
+check "系统区域进入一键修复" "$(fixable_list | grep -c '系统区域' || true)" 1
+COUNTRY2=JP; compute_score
+check "国家归属分歧禁止修系统区域" "$FIXABLE_LOCALE" ""
+
+echo "㉑-F 不支持地区不自动跟随时区"
+base_signals; COUNTRY=CN; COUNTRY2=CN; COUNTRY3=CN; COUNTRY4=CN
+SYS_TZ=America/Los_Angeles; GFW_TZ=Asia/Shanghai; compute_score
+check "不支持地区没有时区自动修复" "$FIXABLE_TZ" ""
+
+echo "㉑-G 普通公共 DNS 修复不得冒充加密 DNS"
+base_signals; DNS_SCOPE="国内公共DNS(223.5.5.5)"; compute_score
+check "DNS 修复名称准确" "$(fixable_list)" "DNS 设置"
+
 echo "㉒ IP 情报响应解析 => 四家来源统一成 ISO 国家码"
 cat >"$TMP/ipapi" <<'JSON'
 {"status":"success","country":"United States","countryCode":"us","city":"Los Angeles","isp":"ISP A","org":"Org A","as":"AS1","hosting":false,"proxy":false}

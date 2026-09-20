@@ -172,7 +172,12 @@ check "主菜单不再重复展示风险摘要" "$(grep -c 'Claude 使用风险:
 check "主菜单不再重复展示使用结论" "$(grep -c '使用结论:' "$ROOT/menubar/StatusApp.swift" || true)" 0
 check "主菜单不再重复展示出口建议" "$(grep -c '出口建议:' "$ROOT/menubar/StatusApp.swift" || true)" 0
 check "Claude 环境项继续使用风险档位" "$([[ $(grep -c 'let riskLevel = c\["risklevel"\]' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
+check "完整报告高风险使用红色状态样式" "$([[ $(grep -c 'riskClass.*bad' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
+check "完整报告风险卡片带状态类" "$([[ $(grep -c 'metric "+(x\[2\]' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
 check "手动项仍可点击查看修复方案" "$(grep -c '一键修复 / 查看方案' "$ROOT/menubar/StatusApp.swift" || true)" 1
+check "一键修复执行前展示确认" "$([[ $(grep -c '确认一键修复' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
+check "系统区域纳入自动修复项" "$([[ $(grep -c 'fixList.contains("系统区域")' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes
+check "浏览器语言提供设置入口" "$([[ $(grep -c 'openBrowserLanguageSettings' "$ROOT/menubar/StatusApp.swift" || true) -ge 2 ]] && echo yes)" yes
 check "更新提示使用强调色主按钮" "$(grep -c 'AccentActionButton(title: "更新并重启"' "$ROOT/menubar/StatusApp.swift" || true)" 1
 check "更新提示支持减少动态效果" "$(grep -c 'accessibilityDisplayShouldReduceMotion' "$ROOT/menubar/StatusApp.swift" || true)" 2
 check "菜单栏标题右侧包含展开箭头" "$([[ $(grep -c '\+ "  ›"' "$ROOT/menubar/StatusApp.swift" || true) -ge 1 ]] && echo yes)" yes

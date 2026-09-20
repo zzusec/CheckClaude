@@ -12,7 +12,7 @@ source "$ROOT/auto-timezone.sh"
 FAIL=0
 NOTIFY_LOG="$TEST_DIR/notifications"
 APPLY_LOG="$TEST_DIR/applied-timezones"
-MOCK_CN=""; MOCK_INTL=""; MOCK_GFW=""; MOCK_GOOGLE=1; MOCK_TZ="America/Los_Angeles"
+MOCK_CN=""; MOCK_INTL=""; MOCK_GFW=""; MOCK_GOOGLE=1; MOCK_TZ="America/Los_Angeles"; MOCK_COUNTRY=US
 MOCK_CURRENT_TZ="America/Los_Angeles"
 
 check() { # check <描述> <实际> <期望>
@@ -37,6 +37,7 @@ google_reachable() {
   printf '%s\n' '0.000|0.000|0.000|0.900|000'; return 1
 }
 ip_timezone() { [[ -n "$MOCK_TZ" ]] && printf '%s\n' "$MOCK_TZ"; }
+ip_country() { [[ -n "$MOCK_COUNTRY" ]] && printf '%s\n' "$MOCK_COUNTRY"; }
 current_timezone() { printf '%s\n' "$MOCK_CURRENT_TZ"; }
 apply_timezone() {
   [[ "$1" == "$MOCK_CURRENT_TZ" ]] && return 0
@@ -186,6 +187,12 @@ run_sample || true
 check "相同权威出口自动纠偏" "$MOCK_CURRENT_TZ" "America/New_York"
 check "纠偏后快照仍一致" "$(value "$STATUS" timezone_synced)" "1"
 check "时区修正记录两次真实变更" "$(wc -l <"$APPLY_LOG" | tr -d ' ')" "2"
+
+printf '%s\n' '⑬ 明确不支持地区只展示出口时区，不自动修改系统时区'
+MOCK_COUNTRY=CN; MOCK_TZ=Asia/Shanghai; MOCK_CURRENT_TZ=America/New_York
+run_sample || true
+check "不支持地区保留系统时区" "$MOCK_CURRENT_TZ" "America/New_York"
+check "状态解释不自动修改" "$(value "$STATUS" timezone_detail | grep -c '不自动修改' || true)" "1"
 
 if [[ $FAIL -eq 0 ]]; then
   echo

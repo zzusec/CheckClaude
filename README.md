@@ -2,7 +2,7 @@
 
 **检查这台机器适不适合跑 Claude**，并把能自动修的直接修掉。附带按出口 IP 自动设置 macOS 系统时区。
 
-菜单栏/托盘常驻，26 项加权信号打分（0–100），列出问题、差几分、下一步做什么；时区、DNS 泄漏、PAC 分流可以一键修复。
+菜单栏/托盘常驻，26 项加权信号打分（0–100），列出问题、差几分、下一步做什么；时区、系统区域、DNS 泄漏、PAC 分流可以一键修复。
 只依赖系统自带能力，无第三方运行时依赖，不要账号，不上传任何数据。
 
 ```
@@ -23,7 +23,15 @@ Claude 环境 🟢 98 分 · 优秀
 | 平台 | 下载 | 要求 |
 |---|---|---|
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
-| Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
+| Windows | [CheckClaude-win.zip（v4.15）](https://github.com/zzusec/CheckClaude/releases/download/v4.15/CheckClaude-win.zip) | Windows 10/11；v4.16 Windows 版稍后发布 |
+
+### v4.16（2026-09-20，macOS）
+
+- 修复台湾、新加坡等地区的中文语言误报：`zh-TW + TW` 不再被要求改成英文，英语作为全球兼容语言也不扣风险分；只有高置信的简繁/地区冲突才提示修改。
+- macOS 一键修复加入变更确认和逐项结果，系统区域可随已确认的支持地区出口自动调整，但不改显示语言；浏览器语言提供对应设置入口和具体步骤。
+- 多家 IP 情报源国家码不一致或出口位于不支持地区时，不自动修改系统区域；后台时区同步也不会跟随明确不支持的出口。
+- 完整报告的风险卡片按档位着色：高风险/极高风险红色、中风险橙色、低风险黄色、安全绿色。
+- 普通公共 DNS 修复不再误称“DNS 加密”，只有 DoH 兜底方案使用加密 DNS 名称。
 
 ### v4.15（2026-09-19）
 
@@ -167,8 +175,8 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 - 任一路临时超时 → 标记为网络检测波动，保留上次有效 IP；不会再产生 `IP → null → 原 IP` 的虚假变化。
 - 网络恢复或出现新 IP 时，连续两次得到相同结果才正式提交，避免公共查询接口偶发失败造成状态乱跳。
 - 四路质量检测全部走 HTTPS/TCP，记录 TCP 建连、TLS、TTFB、总耗时和 HTTP 状态，自动保留最近 24 小时并计算抖动。
-- **时区始终以“谷歌/被封侧出口 IP”为权威**：出口变化独立连续确认两次，不受国内/国外辅助接口波动影响。
-- 每轮会重新核对系统 IANA 时区；若被 macOS 定位服务或人工改动，会自动纠正回权威出口对应时区。
+- **时区以“谷歌/被封侧出口 IP”为权威**：出口变化独立连续确认两次，不受国内/国外辅助接口波动影响。
+- 每轮会重新核对系统 IANA 时区；支持地区会自动纠正。不支持地区只展示出口时区，不自动修改系统设置。
 
 ## Claude 运行环境体检
 
@@ -178,8 +186,8 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 
 ```bash
 ~/CheckClaude/claude-check.sh              # 体检并打印报告
-~/CheckClaude/claude-check.sh --fix        # 顺带自动修可安全修复项（时区）
-~/CheckClaude/claude-check.sh --fix-locale # 额外把系统「区域」改成出口国家
+~/CheckClaude/claude-check.sh --fix        # 修复时区、系统区域、PAC、DNS 等安全项目
+~/CheckClaude/claude-check.sh --fix-locale # --fix 的兼容别名
 ```
 
 共 **26 项加权信号**，合计 100 分，分 6 组：
@@ -197,8 +205,8 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 质量 | 出口链路单一 | 3 | CF 看到的来源 ≠ 检测到的出口 = 多层嵌套代理 |
 | 画像 | 三路出口一致 | 6 | 分流 / PAC 会让画像在多地区间跳变 |
 | 画像 | 系统时区匹配出口 | 5 | 典型矛盾信号，**可一键修复** |
-| 画像 | 系统区域匹配出口 | 4 | 系统区域与出口地区矛盾 |
-| 画像 | **语言变体一致** | 2 | 简体/繁体与出口地区的对应（繁体→TW/HK/MO） |
+| 画像 | 系统区域匹配出口 | 4 | 系统区域与出口地区矛盾，多源归属一致时可一键修复 |
+| 画像 | **语言变体一致** | 2 | 只处罚高置信的中文简繁冲突；英语全球兼容，未知语言不扣分 |
 | 画像 | 时区偏移自洽 | 2 | UTC 偏移与时区名冲突 = 被 `TZ` 覆盖过 |
 | DNS | claude.ai 解析 | 6 | 正常 / fake-ip 接管 / 被污染 |
 | DNS | DNS 出口 | 4 | 用国内公共 DNS = 查询泄漏，**可一键修复** |
@@ -213,7 +221,7 @@ xattr -dr com.apple.quarantine /Applications/CheckClaude.app
 | 浏览器 | **Client Hints** | 2 | Chromium 上报的平台是否与真实系统一致 |
 | 浏览器 | **HTTP 语言首标** | 1 | `Accept-Language` 是否与出口地区明显冲突 |
 
-得分 ≥85 优秀 🟢，70–84 良好 🟡，50–69 风险 🟠，<50 高风险 🔴。
+只有得分 ≥90 且关键项全部通过才是安全绿档；其余按低风险、中风险、高风险、极高风险展示。完整报告中的风险卡片按绿、黄、橙、红着色。
 
 菜单栏/托盘里的「重新体检」会打开系统默认浏览器，通过只监听 `127.0.0.1` 的一次性本地桥接采集浏览器组信号。桥接同时核对 HTTP UA 与 JavaScript UA、UA-CH 平台/品牌、`Accept-Language` 与 `navigator.languages`，并显示 `Sec-Fetch` 请求上下文。
 
@@ -227,9 +235,10 @@ macOS 在默认浏览器回传失败时会回退到内置 WKWebView，Windows �
 | 问题 | 修复方式 |
 |---|---|
 | 系统时区与出口不符 | 全自动改（复用免密 `systemsetup`） |
+| 系统区域与出口不符 | 多源国家码一致且出口受支持时，确认后自动改区域格式；不改显示语言 |
 | PAC 自动分流 | 全自动关（`networksetup -setautoproxystate off`） |
 | DNS 泄漏 / 被污染 | 全自动换成境外 DNS——**先验证**候选能正确解析 `claude.ai` 再改，并备份原值 |
-| 系统区域与出口不符 | 需显式 `--fix-locale`（会影响日期格式显示） |
+| 系统/浏览器语言明确冲突 | 不直接修改语言；打开对应设置入口并给出 Safari、Chrome、Edge、Firefox 操作步骤 |
 | 换节点 / 换住宅 IP / 固定线路 | 只能手动，报告里给出具体建议 |
 
 DNS 修复先拿 `1.1.1.1 / 8.8.8.8 / 9.9.9.9` 各解析一次 `claude.ai`，确认拿到 Anthropic/Cloudflare 真实地址

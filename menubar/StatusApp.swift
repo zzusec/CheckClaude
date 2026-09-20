@@ -693,6 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         p.arguments = [path] + args
         var env = ProcessInfo.processInfo.environment
         env["AUTO_TZ_DIR"] = baseDir   // 与脚本共用同一数据目录
+        env["CHECKCLAUDE_GUI"] = "1"  // 对话框由 App 统一展示，避免 shell 重复弹窗
         p.environment = env
         if isScan { scanProcess = p }
         p.terminationHandler = { [weak self] process in
@@ -956,6 +957,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fixList = c["fixlist"] ?? ""
         let actualAutoFixable: Set<String> = [
             fixList.contains("时区") ? "系统时区匹配出口" : "",
+            fixList.contains("系统区域") ? "系统区域匹配出口" : "",
             fixList.contains("DNS") ? "DNS 出口" : "",
             fixList.contains("PAC") ? "代理形态" : "",
         ]
@@ -973,6 +975,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for (i, part) in f[2].components(separatedBy: "；").enumerated() {
                     sub.addItem(disabled("      \(i == 0 ? "" : "或 ")\(part)"))
                 }
+                sub.addItem(.separator())
+            }
+            if manual.contains(where: { ["浏览器语言", "Intl 区域设置", "HTTP 语言首标"].contains($0[0]) }) {
+                sub.addItem(action("打开浏览器语言设置", #selector(openBrowserLanguageSettings)))
                 sub.addItem(.separator())
             }
             sub.addItem(action("重新体检", #selector(runClaudeCheck)))
@@ -1251,15 +1257,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 sub.addItem(colored("🎉 已满分", .labelColor))
             } else {
                 sub.addItem(colored("还能提 \(100 - score) 分", .labelColor))
-                let fixableNames = ["系统时区匹配出口", "DNS 出口", "代理形态"]
+                let fixableNames = ["系统时区匹配出口", "系统区域匹配出口", "DNS 出口", "代理形态"]
+                let browserSettingNames: Set<String> = ["浏览器语言", "Intl 区域设置", "HTTP 语言首标"]
                 for g in gains {
                     let f = g.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
                     guard f.count >= 3 else { continue }
                     // 能一键修的项，点它就直接修
                     let canFix = c["fixable"] == "1" && fixableNames.contains(f[0])
                     let mark = canFix ? "⚡" : "＋\(f[1])"
+                    let selector = !canFix && browserSettingNames.contains(f[0])
+                        ? #selector(openBrowserLanguageSettings) : #selector(runClaudeFix)
                     sub.addItem(colored("   \(mark)  \(f[0])：\(f[2])", .labelColor,
-                                        #selector(runClaudeFix)))
+                                        selector))
                 }
             }
             // 26 项信号，按六组展示: 分组~标签~权重~得分~值
@@ -1311,15 +1320,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             default: headerState = "未采集"
             }
             sub.addItem(disabled("浏览器请求头: \(headerState) · Sec-Fetch \(c["brfetch"] ?? "?")"))
+            if c["restartpending"] == "1" {
+                sub.addItem(colored("浏览器相关项待重启验证", .systemOrange))
+            }
             // issues/fixes 两段与顶部提分清单、「手动处理步骤」子菜单重复，
             // 还是弹窗里最长的行 —— 删掉，宽度和高度一起降下来
             sub.addItem(.separator())
             sub.addItem(disabled("体检时间: \(c["time"] ?? "—")"))
         }
         sub.addItem(.separator())
-        if let cc = c["country"], cc != "?", (c["locale"] ?? "").hasSuffix("_\(cc)") == false {
-            sub.addItem(action("把系统区域改为 \(cc)", #selector(runClaudeFixLocale)))
-        }
         if c["needsudo"] == "1" {
             sub.addItem(disabled("⚠️ 部分修复需 sudo 授权"))
         }
@@ -1341,8 +1350,141 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(!browserProbeEnabled, forKey: "browserProbe")
         refresh()
     }
-    // 修复不依赖浏览器信号，直接跑脚本，别让用户干等 WebView 采集
-    @objc func runClaudeFix() { runScript(["--fix"], claudeScriptPath) }
+
+    func parsedGains(_ c: [String: String]) -> [[String]] {
+        (c["gains"] ?? "").split(separator: "|").compactMap { row in
+            let fields = row.split(separator: "~", omittingEmptySubsequences: false).map(String.init)
+            return fields.count >= 3 ? fields : nil
+        }
+    }
+
+    func autoFixableLabels(_ c: [String: String]) -> Set<String> {
+        let list = c["fixlist"] ?? ""
+        return Set([
+            list.contains("时区") ? "系统时区匹配出口" : "",
+            list.contains("系统区域") ? "系统区域匹配出口" : "",
+            list.contains("DNS") ? "DNS 出口" : "",
+            list.contains("PAC") ? "代理形态" : "",
+        ].filter { !$0.isEmpty })
+    }
+
+    func manualFixRows(_ c: [String: String]) -> [[String]] {
+        let automatic = autoFixableLabels(c)
+        return parsedGains(c).filter { !automatic.contains($0[0]) }
+    }
+
+    func hasBrowserLanguageWork(_ rows: [[String]]) -> Bool {
+        let labels: Set<String> = ["浏览器语言", "Intl 区域设置", "HTTP 语言首标"]
+        return rows.contains { labels.contains($0[0]) }
+    }
+
+    func openBrowserSettings(_ browser: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        switch browser {
+        case let value where value.contains("Chrome"):
+            p.arguments = ["-a", "Google Chrome", "chrome://settings/languages"]
+        case let value where value.contains("Edge"):
+            p.arguments = ["-a", "Microsoft Edge", "edge://settings/languages"]
+        case let value where value.contains("Firefox"):
+            p.arguments = ["-a", "Firefox", "about:preferences#general"]
+        default:
+            // Safari 跟随 macOS 的每 App/系统语言；未知浏览器也先打开正确的系统入口。
+            p.arguments = ["x-apple.systempreferences:com.apple.Localization-Settings.extension"]
+        }
+        do { try p.run() }
+        catch { notify("无法自动打开设置", "请按手动处理步骤进入浏览器语言设置") }
+    }
+
+    @objc func openBrowserLanguageSettings() {
+        let c = readStatus(claudeStatusPath)
+        openBrowserSettings(c["brbrowser"] ?? "")
+    }
+
+    func fixPlanLines(_ c: [String: String]) -> [String] {
+        let list = c["fixlist"] ?? ""
+        var lines: [String] = []
+        if list.contains("时区") {
+            lines.append("• 时区：\(c["systz"] ?? "?") → \(c["iptz"] ?? "?")")
+        }
+        if list.contains("系统区域") {
+            lines.append("• 系统区域：\(c["locale"] ?? "?") → \(c["fixlocale"] ?? c["country"] ?? "?")（不改显示语言）")
+        }
+        if list.contains("PAC") {
+            lines.append("• 关闭 PAC 自动分流：\(c["proxymode"] ?? "?")")
+        }
+        if list.contains("DNS") {
+            lines.append("• DNS 设置：验证可信公共 DNS 后再修改当前网络服务")
+        }
+        return lines
+    }
+
+    func presentFixResult(exitStatus: Int32) {
+        let c = readStatus(claudeStatusPath)
+        let results = c["fixresults"] ?? ""
+        let errors = c["fixerrors"] ?? ""
+        let manual = manualFixRows(c)
+        var sections: [String] = []
+        if !results.isEmpty {
+            sections.append("已完成：\n" + results.components(separatedBy: "；").map { "• " + $0 }.joined(separator: "\n"))
+        }
+        if !errors.isEmpty {
+            sections.append("未完成：\n" + errors.components(separatedBy: "；").map { "• " + $0 }.joined(separator: "\n"))
+        } else if exitStatus != 0 {
+            sections.append("修复进程异常退出（状态 \(exitStatus)），请重新体检后再试。")
+        }
+        if c["restartpending"] == "1" {
+            sections.append("浏览器相关信号待重启验证：完全退出并重开浏览器，再点“重新体检”。")
+        }
+        if !manual.isEmpty {
+            let lines = manual.map { "• \($0[0])：\($0[2])" }.joined(separator: "\n")
+            sections.append("需要手动处理：\n" + lines)
+        }
+        if sections.isEmpty { sections.append("没有检测到可自动修复的项目。") }
+
+        let alert = NSAlert()
+        alert.alertStyle = errors.isEmpty && exitStatus == 0 ? .informational : .warning
+        alert.messageText = errors.isEmpty && exitStatus == 0 ? "修复完成" : "部分项目未完成"
+        alert.informativeText = sections.joined(separator: "\n\n")
+        alert.addButton(withTitle: "知道了")
+        if hasBrowserLanguageWork(manual) { alert.addButton(withTitle: "打开浏览器语言设置") }
+        let response = alert.runModal()
+        if response == .alertSecondButtonReturn { openBrowserSettings(c["brbrowser"] ?? "") }
+    }
+
+    // 修复前明确列出自动变更与手动项；确认后逐项执行，某一项失败不回滚其它成功项。
+    @objc func runClaudeFix() {
+        guard phase == nil else { return }
+        let c = readStatus(claudeStatusPath)
+        let automatic = fixPlanLines(c)
+        let manual = manualFixRows(c)
+        let alert = NSAlert()
+        alert.alertStyle = automatic.isEmpty ? .informational : .warning
+        alert.messageText = automatic.isEmpty ? "这些项目需要手动处理" : "确认一键修复"
+        var sections: [String] = []
+        if !automatic.isEmpty { sections.append("将自动修改：\n" + automatic.joined(separator: "\n")) }
+        if !manual.isEmpty {
+            sections.append("需要手动处理：\n" + manual.map { "• \($0[0])：\($0[2])" }.joined(separator: "\n"))
+        }
+        alert.informativeText = sections.isEmpty ? "当前没有需要修复的项目。" : sections.joined(separator: "\n\n")
+        alert.addButton(withTitle: automatic.isEmpty ? "知道了" : "开始修复")
+        if !automatic.isEmpty { alert.addButton(withTitle: "取消") }
+        else if hasBrowserLanguageWork(manual) { alert.addButton(withTitle: "打开浏览器语言设置") }
+
+        let response = alert.runModal()
+        if automatic.isEmpty {
+            if response == .alertSecondButtonReturn { openBrowserSettings(c["brbrowser"] ?? "") }
+            return
+        }
+        guard response == .alertFirstButtonReturn else { return }
+        phase = "修复中"; refresh()
+        runScript(["--fix"], claudeScriptPath) { [weak self] status in
+            guard let self else { return }
+            self.phase = nil
+            self.refresh()
+            self.presentFixResult(exitStatus: status)
+        }
+    }
 
     // 升级期间每秒刷新菜单显示进度 —— 点了「立即升级」之后一片寂静，
     // 用户不知道是在下载还是卡死了。
@@ -1370,8 +1512,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
         return s.isEmpty ? nil : s
     }
-    @objc func runClaudeFixLocale() { runScript(["--fix-locale"], claudeScriptPath) }
-
     @objc func runCheck() { runScript(["--once"], isScan: true) }
 
     // 发现新版时主动显示右下角非模态提示，不抢当前窗口焦点；每天最多提醒一次。
@@ -1918,16 +2058,16 @@ final class BrowserBridge {
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <title>CheckClaude 完整环境体检</title>
         <style>
-        :root{color-scheme:light dark;--bg:#f5f6f8;--surface:#fff;--surface2:#f8f9fb;--text:#172033;--muted:#667085;--line:#dfe3ea;--good:#08783e;--goodbg:#eaf8f0;--warn:#9a5700;--warnbg:#fff4dc;--bad:#b42318;--badbg:#fff0ee;--info:#175cd3;--infobg:#eef4ff;--accent:#315efb}
-        @media(prefers-color-scheme:dark){:root{--bg:#0c111b;--surface:#151c28;--surface2:#1b2432;--text:#f4f6fb;--muted:#aab4c4;--line:#2d394b;--good:#72d69b;--goodbg:#123526;--warn:#f6c76d;--warnbg:#3c2c10;--bad:#ff9b91;--badbg:#451d1d;--info:#9cc2ff;--infobg:#172e55;--accent:#7ca4ff}}
+        :root{color-scheme:light dark;--bg:#f5f6f8;--surface:#fff;--surface2:#f8f9fb;--text:#172033;--muted:#667085;--line:#dfe3ea;--good:#08783e;--goodbg:#eaf8f0;--caution:#806000;--cautionbg:#fff8cf;--warn:#9a5700;--warnbg:#fff4dc;--bad:#b42318;--badbg:#fff0ee;--info:#175cd3;--infobg:#eef4ff;--accent:#315efb}
+        @media(prefers-color-scheme:dark){:root{--bg:#0c111b;--surface:#151c28;--surface2:#1b2432;--text:#f4f6fb;--muted:#aab4c4;--line:#2d394b;--good:#72d69b;--goodbg:#123526;--caution:#f5dc74;--cautionbg:#3a3210;--warn:#f6c76d;--warnbg:#3c2c10;--bad:#ff9b91;--badbg:#451d1d;--info:#9cc2ff;--infobg:#172e55;--accent:#7ca4ff}}
         *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button{font:inherit}
         main{width:min(1120px,calc(100% - 32px));margin:36px auto 80px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:22px}.brand{font-size:13px;font-weight:750;letter-spacing:.08em;color:var(--accent)}h1{margin:5px 0 6px;font-size:clamp(27px,4vw,42px);line-height:1.15;letter-spacing:-.03em}.lead{margin:0;color:var(--muted)}
         .close{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:10px;padding:9px 14px;cursor:pointer}.close:hover{border-color:var(--accent)}
         .status{display:flex;align-items:center;gap:10px;margin:18px 0;padding:13px 15px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}.spinner{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-        .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metric{padding:17px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.metric b{display:block;font-size:25px;line-height:1.2}.metric span{display:block;margin-top:5px;color:var(--muted);font-size:12px}
+        .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}.metric{padding:17px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.metric b{display:block;font-size:25px;line-height:1.2}.metric span{display:block;margin-top:5px;color:var(--muted);font-size:12px}.metric.good{border-color:var(--good);background:var(--goodbg)}.metric.caution{color:var(--caution);border-color:var(--caution);background:var(--cautionbg)}.metric.warn{border-color:var(--warn);background:var(--warnbg)}.metric.bad{border-color:var(--bad);background:var(--badbg)}
         .verdict{margin:0 0 18px;padding:17px 19px;border-radius:14px;background:var(--surface);border:1px solid var(--line);font-weight:650}
         section{margin-top:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface);overflow:hidden}section h2{margin:0;padding:15px 18px 12px;font-size:17px}section .desc{margin:-8px 18px 12px;color:var(--muted);font-size:13px}.rows{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:minmax(150px,230px) 1fr;gap:18px;padding:11px 18px;border-top:1px solid var(--line)}.row:first-child{border-top:0}.key{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
-        .pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:750}.good{color:var(--good);background:var(--goodbg)}.warn{color:var(--warn);background:var(--warnbg)}.bad{color:var(--bad);background:var(--badbg)}.neutral{color:var(--info);background:var(--infobg)}
+        .pill{display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-size:12px;font-weight:750}.good{color:var(--good);background:var(--goodbg)}.caution{color:var(--caution);background:var(--cautionbg)}.warn{color:var(--warn);background:var(--warnbg)}.bad{color:var(--bad);background:var(--badbg)}.neutral{color:var(--info);background:var(--infobg)}
         .matrix{display:grid;grid-template-columns:1.15fr auto 2fr;gap:0;border-top:1px solid var(--line)}.matrix>div{padding:11px 16px;border-top:1px solid var(--line)}.matrix>div:nth-child(-n+3){border-top:0}.matrix .detail{color:var(--muted)}
         .signal-table{width:100%;border-collapse:collapse}.signal-table th,.signal-table td{text-align:left;padding:10px 13px;border-top:1px solid var(--line);vertical-align:top}.signal-table th{color:var(--muted);font-size:12px}.signal-table td:last-child,.signal-table th:last-child{text-align:right;white-space:nowrap}.signal-table .miss{color:var(--bad);font-weight:700}.signal-table .full{color:var(--good)}
         ul{margin:0;padding:0 0 0 20px}li+li{margin-top:7px}.note{color:var(--muted);font-size:13px}.footer{margin-top:22px;color:var(--muted);font-size:13px;text-align:center}
@@ -1995,8 +2135,9 @@ final class BrowserBridge {
             keepOpen.onclick=()=>{closeCancelled=true;clearInterval(closeTimer);countdownText.textContent="已取消自动关闭，可继续查看报告。";keepOpen.remove();};
             content.replaceChildren();
             const score=Number(c.score||0), safe=score>=90&&c.grade==="优秀"&&c.consistent==="1";
+            const riskLevel=txt(c.risklevel||c.grade),riskClass=riskLevel==="安全"?"good":riskLevel==="低风险"?"caution":riskLevel==="中风险"?"warn":"bad";
             const summary=element("div","summary");
-            [[score+" / 100","环境得分"],[txt(c.risklevel||c.grade),"使用风险"],[txt(c.country),"出口国家"],[c.consistent==="1"?"三路一致":"三路不一致","出口状态"]].forEach(x=>{const m=element("div","metric");m.append(element("b","",x[0]),element("span","",x[1]));summary.append(m);});
+            [[score+" / 100","环境得分",riskClass],[riskLevel,"使用风险",riskClass],[txt(c.country),"出口国家",""],[c.consistent==="1"?"三路一致":"三路不一致","出口状态",c.consistent==="1"?"good":"bad"]].forEach(x=>{const m=element("div","metric "+(x[2]||""));m.append(element("b","",x[0]),element("span","",x[1]));summary.append(m);});
             content.append(summary,element("div","verdict "+(safe?"good":score>=70?"warn":"bad"),txt(c.verdict)));
 
             const matrixSection=element("section"); matrixSection.append(element("h2","","信号一致性矩阵"),element("p","desc","比单项数量更重要的是出口、系统和浏览器彼此是否自洽。")); const matrixHost=element("div","matrix"); matrixSection.append(matrixHost); content.append(matrixSection);
