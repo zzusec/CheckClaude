@@ -7,7 +7,7 @@ if (-not (Test-Path $csc)) { throw "csc.exe not found" }
 
 $out = "$here\BrowserBridgeTests.exe"
 & $csc /nologo /target:exe /optimize+ /platform:anycpu /out:"$out" `
-       /reference:System.dll,System.Core.dll `
+       /reference:System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll `
        /main:CheckClaude.BrowserBridgeTests `
        "$here\Program.cs" "$here\BrowserBridge.cs" "$here\BrowserBridgeTests.cs"
 if ($LASTEXITCODE -ne 0) { throw "test compile failed" }

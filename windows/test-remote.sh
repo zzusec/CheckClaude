@@ -3,8 +3,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${WIN_HOST:-win-ding}"
-REMOTE="C:~/checkclaude-build"
+REMOTE="C:/Users/hx10/checkclaude-build"
 
-ssh "$HOST" "if not exist \"$REMOTE\" mkdir \"$REMOTE\"" >/dev/null 2>&1 || true
-scp -q Program.cs BrowserBridge.cs BrowserBridgeTests.cs test-remote.ps1 "$HOST:$REMOTE/"
+ssh "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE' | Out-Null\""
+scp Program.cs BrowserBridge.cs BrowserBridgeTests.cs test-remote.ps1 "$HOST:$REMOTE/"
 ssh "$HOST" "powershell -NoProfile -ExecutionPolicy Bypass -File $REMOTE/test-remote.ps1"

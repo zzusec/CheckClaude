@@ -23,12 +23,12 @@ Claude 环境 🟢 98 分 · 优秀
 | 平台 | 下载 | 要求 |
 |---|---|---|
 | macOS | [CheckClaude.dmg](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude.dmg) | macOS 12+，拖进 Applications，首次打开见下方说明 |
-| Windows | [CheckClaude-win.zip（v4.15）](https://github.com/zzusec/CheckClaude/releases/download/v4.15/CheckClaude-win.zip) | Windows 10/11；v4.16 Windows 版稍后发布 |
+| Windows | [CheckClaude-win.zip](https://github.com/zzusec/CheckClaude/releases/latest/download/CheckClaude-win.zip) | Windows 10/11，解压双击即用，无需装运行时 |
 
-### v4.16（2026-09-20，macOS）
+### v4.16（2026-09-20）
 
 - 修复台湾、新加坡等地区的中文语言误报：`zh-TW + TW` 不再被要求改成英文，英语作为全球兼容语言也不扣风险分；只有高置信的简繁/地区冲突才提示修改。
-- macOS 一键修复加入变更确认和逐项结果，系统区域可随已确认的支持地区出口自动调整，但不改显示语言；浏览器语言提供对应设置入口和具体步骤。
+- macOS 和 Windows 的一键修复加入变更确认和逐项结果，系统区域可随已确认的支持地区出口自动调整，但不改显示语言；浏览器语言提供对应设置入口和具体步骤。
 - 多家 IP 情报源国家码不一致或出口位于不支持地区时，不自动修改系统区域；后台时区同步也不会跟随明确不支持的出口。
 - 完整报告的风险卡片按档位着色：高风险/极高风险红色、中风险橙色、低风险黄色、安全绿色。
 - 普通公共 DNS 修复不再误称“DNS 加密”，只有 DoH 兜底方案使用加密 DNS 名称。

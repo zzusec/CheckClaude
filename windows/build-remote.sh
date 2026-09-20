@@ -7,12 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 HOST="${WIN_HOST:-win-ding}"
-VER="${1:-4.12}"
-REMOTE="C:~/checkclaude-build"
+VER="${1:-4.16}"
+REMOTE="C:/Users/hx10/checkclaude-build"
 
 echo "==> 版本 ${VER}，同步源码到 $HOST"
-ssh "$HOST" "if not exist \"$REMOTE\" mkdir \"$REMOTE\"" >/dev/null 2>&1 || true
-scp -q Program.cs BrowserBridge.cs build.ps1 "$HOST:$REMOTE/"
+ssh "$HOST" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force '$REMOTE' | Out-Null\""
+scp Program.cs BrowserBridge.cs build.ps1 "$HOST:$REMOTE/"
 
 echo "==> 远程编译"
 ssh "$HOST" "powershell -ExecutionPolicy Bypass -File $REMOTE/build.ps1 -Version $VER"

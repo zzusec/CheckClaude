@@ -183,6 +183,7 @@ namespace CheckClaude
         public bool GoogleReachable;
         public bool Consistent;
         public string Country, CountryName, City, Isp, Asn, Country2, Isp2;
+        public bool CountrySourcesAgree; // 两家 IP 情报都返回国家码且结论一致
         public int AsnMatch = -1;   // -1 数据不足 0 两家 ASN 归属不一致 1 一致
         public int Hosting = -1;     // -1 未知 0 住宅 1 机房
         public bool Proxy;
@@ -198,7 +199,7 @@ namespace CheckClaude
         public string ClaudeVer, ClaudeBase;
         public string ActiveNic;
         // 浏览器指纹(由 BrowserBridge 采集后写文件，这里读回来)
-        public bool BrOk; public string BrSource, BrTz, BrLangs, BrLocale, BrRtc, BrWebgl, BrFonts, BrChPlat, BrAccept;
+        public bool BrOk; public string BrSource, BrTz, BrLangs, BrLocale, BrRtc, BrWebgl, BrFonts, BrChPlat, BrAccept, BrUa;
     }
 
     static class Collector
@@ -300,6 +301,8 @@ namespace CheckClaude
                 }
                 var b = t2.Result;
                 f.Country2 = Net.Json(b, "country");
+                f.CountrySourcesAgree = !string.IsNullOrEmpty(f.Country) && !string.IsNullOrEmpty(f.Country2)
+                    && string.Equals(f.Country, f.Country2, StringComparison.OrdinalIgnoreCase);
                 f.Isp2 = Net.Json(b, "org");
                 // ASN 交叉比对: 国家码一致不等于归属一致。同一个 IP 在 ip-api 报 AS5065 住宅 ISP、
                 // 在 ipinfo 报 AS3257 GTT(骨干/IDC)，说明这段 IP 的归属登记本身有分歧 ——
@@ -392,8 +395,9 @@ namespace CheckClaude
 
         static void CollectSystem(Facts f)
         {
-            f.Locale = CultureInfo.CurrentCulture.Name;               // 如 zh-CN / en-US
-            f.LangName = CultureInfo.CurrentCulture.TwoLetterISOLanguageName;
+            f.Locale = LocalePolicy.CurrentUserCultureName();         // 如 zh-CN / en-US
+            try { f.LangName = CultureInfo.GetCultureInfo(f.Locale).TwoLetterISOLanguageName; }
+            catch { f.LangName = CultureInfo.CurrentCulture.TwoLetterISOLanguageName; }
 
             // 代理形态: 注册表看系统代理和 PAC；TUN 类代理会插一块虚拟网卡并抢默认路由
             f.ProxyMode = "直连"; f.PacOn = false;
@@ -494,6 +498,7 @@ namespace CheckClaude
                 switch (k)
                 {
                     case "source": f.BrSource = v; break;
+                    case "ua": f.BrUa = v; break;
                     case "tz": f.BrTz = v; break;
                     case "languages": f.BrLangs = v; break;
                     case "locale": f.BrLocale = v; break;
@@ -558,6 +563,195 @@ namespace CheckClaude
         }
     }
 
+    enum LocaleMatchKind
+    {
+        Compatible,
+        Conflict,
+        Unknown
+    }
+
+    class LocaleMatch
+    {
+        public LocaleMatchKind Kind;
+        public string Tag, Variant, Recommended;
+    }
+
+    // 语言是个人偏好，不能从 IP 唯一推导。这里只识别高置信的中文简繁冲突；
+    // 英语在所有地区都兼容，其他无法确定的语言不扣分。
+    static class LocalePolicy
+    {
+        static readonly string[] TraditionalCc = { "TW", "HK", "MO" };
+        static readonly string[] SimplifiedCc = { "CN", "SG", "MY" };
+        static readonly Dictionary<string, string> Recommended = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "US", "en-US" }, { "CA", "en-CA" }, { "GB", "en-GB" }, { "IE", "en-IE" },
+            { "DE", "de-DE" }, { "FR", "fr-FR" }, { "NL", "nl-NL" }, { "SE", "sv-SE" },
+            { "NO", "nb-NO" }, { "DK", "da-DK" }, { "FI", "fi-FI" }, { "IT", "it-IT" },
+            { "ES", "es-ES" }, { "PT", "pt-PT" }, { "PL", "pl-PL" }, { "CZ", "cs-CZ" },
+            { "AT", "de-AT" }, { "CH", "de-CH" }, { "BE", "nl-BE" }, { "LU", "fr-LU" },
+            { "JP", "ja-JP" }, { "KR", "ko-KR" }, { "SG", "zh-SG" }, { "TW", "zh-TW" },
+            { "HK", "zh-HK" }, { "MO", "zh-MO" }, { "CN", "zh-CN" },
+            { "AU", "en-AU" }, { "NZ", "en-NZ" }, { "IL", "he-IL" }, { "AE", "ar-AE" },
+            { "MX", "es-MX" }, { "BR", "pt-BR" }, { "IN", "hi-IN" }, { "PH", "fil-PH" },
+            { "TH", "th-TH" }, { "MY", "ms-MY" }, { "ID", "id-ID" }, { "VN", "vi-VN" },
+            { "ZA", "en-ZA" }, { "TR", "tr-TR" }, { "SA", "ar-SA" }, { "AR", "es-AR" },
+            { "CL", "es-CL" }
+        };
+
+        public static string CurrentUserCultureName()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(@"Control Panel\International"))
+                {
+                    var name = k == null ? null : k.GetValue("LocaleName") as string;
+                    if (!string.IsNullOrEmpty(name)) return name;
+                }
+            }
+            catch { }
+            return CultureInfo.CurrentCulture.Name;
+        }
+
+        public static string PrimaryTag(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var tag = raw.Split(',')[0].Split(';')[0].Trim().Replace('_', '-');
+            return tag.Length == 0 ? null : tag;
+        }
+
+        public static string RegionCode(string raw)
+        {
+            var tag = PrimaryTag(raw);
+            if (tag == null) return null;
+            var parts = tag.Split('-');
+            for (int i = parts.Length - 1; i >= 1; i--)
+            {
+                var part = parts[i];
+                if (part.Length == 2 && part.All(char.IsLetter)) return part.ToUpperInvariant();
+            }
+            return null;
+        }
+
+        public static string LanguageCode(string raw)
+        {
+            var tag = PrimaryTag(raw);
+            if (tag == null) return null;
+            return tag.Split('-')[0].ToLowerInvariant();
+        }
+
+        public static string ChineseVariant(string raw)
+        {
+            if (LanguageCode(raw) != "zh") return null;
+            var tag = PrimaryTag(raw).ToLowerInvariant();
+            if (tag.Split('-').Contains("hant")) return "繁体";
+            if (tag.Split('-').Contains("hans")) return "简体";
+            var cc = RegionCode(tag);
+            if (cc != null && TraditionalCc.Contains(cc)) return "繁体";
+            if (cc != null && SimplifiedCc.Contains(cc)) return "简体";
+            return null;
+        }
+
+        public static string RecommendedLocale(string country)
+        {
+            if (string.IsNullOrEmpty(country)) return null;
+            string locale;
+            return Recommended.TryGetValue(country, out locale) ? locale : null;
+        }
+
+        public static string TargetCulture(string currentLocale, string country)
+        {
+            var language = LanguageCode(currentLocale);
+            if (!string.IsNullOrEmpty(language) && !string.IsNullOrEmpty(country))
+            {
+                var candidate = language + "-" + country.ToUpperInvariant();
+                try
+                {
+                    CultureInfo.GetCultureInfo(candidate);
+                    if (string.Equals(RegionCode(candidate), country, StringComparison.OrdinalIgnoreCase)) return candidate;
+                }
+                catch { }
+            }
+            return RecommendedLocale(country);
+        }
+
+        static string RecommendedLanguage(string country)
+        {
+            switch ((country ?? "").ToUpperInvariant())
+            {
+                case "TW": return "zh-TW";
+                case "HK": return "zh-HK";
+                case "MO": return "zh-MO";
+                case "CN": return "zh-CN";
+                case "SG": return "zh-SG";
+                case "MY": return "zh-MY";
+                default: return RecommendedLocale(country);
+            }
+        }
+
+        public static LocaleMatch Evaluate(string raw, string country)
+        {
+            var result = new LocaleMatch
+            {
+                Kind = LocaleMatchKind.Unknown,
+                Tag = PrimaryTag(raw),
+                Recommended = RecommendedLocale(country)
+            };
+            if (result.Tag == null || string.IsNullOrEmpty(country)) return result;
+
+            var language = LanguageCode(result.Tag);
+            var region = RegionCode(result.Tag);
+            if (string.Equals(region, country, StringComparison.OrdinalIgnoreCase) || language == "en")
+            {
+                result.Kind = LocaleMatchKind.Compatible;
+                return result;
+            }
+            if (language != "zh") return result;
+
+            result.Variant = ChineseVariant(result.Tag);
+            string expected = TraditionalCc.Contains(country.ToUpperInvariant()) ? "繁体"
+                            : SimplifiedCc.Contains(country.ToUpperInvariant()) ? "简体" : null;
+            if (result.Variant == null) return result;
+            result.Kind = expected == null || result.Variant != expected
+                ? LocaleMatchKind.Conflict : LocaleMatchKind.Compatible;
+            return result;
+        }
+
+        public static string BrowserName(string ua)
+        {
+            ua = ua ?? "";
+            if (ua.IndexOf("Edg/", StringComparison.OrdinalIgnoreCase) >= 0) return "Microsoft Edge";
+            if (ua.IndexOf("Firefox/", StringComparison.OrdinalIgnoreCase) >= 0) return "Firefox";
+            if (ua.IndexOf("Chrome/", StringComparison.OrdinalIgnoreCase) >= 0) return "Google Chrome";
+            return "浏览器";
+        }
+
+        public static string LanguageHint(string country, string target)
+        {
+            var locale = RecommendedLanguage(country);
+            if (string.IsNullOrEmpty(locale)) return target + "使用你实际需要的语言即可；当前信息不足，不建议仅按 IP 猜测";
+            if (target.StartsWith("Windows", StringComparison.Ordinal))
+                return "Windows 设置 → 时间和语言 → 语言和区域，将 " + locale
+                    + " 设为首选语言；按系统提示注销或重开应用后重新体检";
+            return "浏览器设置 → 语言，将 " + locale + " 设为首选；完全退出并重开浏览器后重新体检";
+        }
+
+        public static string BrowserLanguageHint(string country, string ua)
+        {
+            var locale = RecommendedLanguage(country) ?? "与出口兼容的语言";
+            switch (BrowserName(ua))
+            {
+                case "Google Chrome":
+                    return "Chrome 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Chrome";
+                case "Microsoft Edge":
+                    return "Edge 设置 → 语言；添加 " + locale + " 并移到首位；完全退出后重开 Edge";
+                case "Firefox":
+                    return "Firefox 设置 → 常规 → 语言；把 " + locale + " 调到首位；重启 Firefox";
+                default:
+                    return "浏览器设置 → 语言；把 " + locale + " 调到首位；重启浏览器后重新体检";
+            }
+        }
+    }
+
     // ── 打分: 与 macOS 版同一套权重 ─────────────────────────────
     class Report
     {
@@ -567,6 +761,7 @@ namespace CheckClaude
         public List<string> Issues = new List<string>();
         public List<string> Fixes = new List<string>();
         public string FixableTz;          // 待修的目标 Windows 时区 ID
+        public string FixableCulture;     // 待修的当前用户区域格式，如 zh-TW
         public bool FixableDns, FixablePac;
         public Facts F;
 
@@ -574,14 +769,28 @@ namespace CheckClaude
         {
             get { return Signals.Where(s => s.Points < s.Weight).OrderByDescending(s => s.Weight - s.Points).ToList(); }
         }
+        public bool IsAutoFixable(Signal s)
+        {
+            if (s == null) return false;
+            if (s.Label == "系统时区匹配出口") return FixableTz != null;
+            if (s.Label == "系统区域匹配出口") return FixableCulture != null;
+            if (s.Label == "代理形态") return FixablePac;
+            if (s.Label == "claude.ai 解析" || s.Label == "DNS 出口") return FixableDns;
+            return false;
+        }
+        public List<Signal> ManualGains
+        {
+            get { return Gains.Where(s => !IsAutoFixable(s)).ToList(); }
+        }
         public string FixList
         {
             get
             {
                 var l = new List<string>();
                 if (FixableTz != null) l.Add("时区");
+                if (FixableCulture != null) l.Add("区域格式");
                 if (FixablePac) l.Add("关PAC分流");
-                if (FixableDns) l.Add("DNS加密");
+                if (FixableDns) l.Add("DNS设置");
                 return string.Join("、", l.ToArray());
             }
         }
@@ -726,11 +935,18 @@ namespace CheckClaude
             else
             {
                 var target = Tz.ToWindows(f.IpTimezone);
-                r.Sig("画像", "系统时区匹配出口", 5, 0, f.SysTimezone + " ≠ " + f.IpTimezone,
-                    target != null ? "点「一键修复」即可自动改" : "手动把系统时区改成 " + f.IpTimezone,
-                    "系统时区 " + f.SysTimezone + " 与出口时区 " + f.IpTimezone + " 不一致，是典型的环境矛盾信号",
-                    target != null ? "可一键修复: 把系统时区改为 " + f.IpTimezone : "手动改系统时区");
-                r.FixableTz = target;
+                if (Collector.IsUnsupported(f.Country))
+                    r.Sig("画像", "系统时区匹配出口", 5, 0, f.SysTimezone + " ≠ " + f.IpTimezone,
+                        "先换到支持地区且归属明确的节点，再按新出口修复时区",
+                        "系统时区 " + f.SysTimezone + " 与不支持地区出口时区 " + f.IpTimezone + " 不一致");
+                else
+                {
+                    r.Sig("画像", "系统时区匹配出口", 5, 0, f.SysTimezone + " ≠ " + f.IpTimezone,
+                        target != null ? "点「一键修复」即可自动改" : "手动把系统时区改成 " + f.IpTimezone,
+                        "系统时区 " + f.SysTimezone + " 与出口时区 " + f.IpTimezone + " 不一致，是典型的环境矛盾信号",
+                        target != null ? "可一键修复: 把系统时区改为 " + f.IpTimezone : "手动改系统时区");
+                    r.FixableTz = target;
+                }
             }
 
             // Windows 上时区偏移由系统统一管理，没有 macOS 那种 TZ 环境变量覆盖的情况，
@@ -740,35 +956,41 @@ namespace CheckClaude
                 DateTimeOffset.Now.ToString("zzz"), "检查系统日期时间设置",
                 offsetOk ? null : "当前 UTC 偏移与时区定义不符");
 
-            string localeCc = f.Locale != null && f.Locale.Contains("-") ? f.Locale.Split('-').Last() : null;
+            string localeCc = LocalePolicy.RegionCode(f.Locale);
             if (string.IsNullOrEmpty(f.Country) || localeCc == null)
                 r.Sig("画像", "系统区域匹配出口", 4, 50, "数据不足", "重新体检");
             else if (string.Equals(localeCc, f.Country, StringComparison.OrdinalIgnoreCase))
                 r.Sig("画像", "系统区域匹配出口", 4, 100, f.Locale, null);
-            else if (f.LangName == "zh")
-                r.Sig("画像", "系统区域匹配出口", 4, 50, f.Locale + " vs " + f.Country,
-                    "只用 Claude Code(CLI) 可忽略；常用网页端可把系统区域改成 " + f.Country,
-                    "系统语言中文 + 区域 " + localeCc + " 与出口 " + f.Country + " 不一致(网页端登录会暴露矛盾)",
-                    "常用网页端可把系统区域改成 " + f.Country);
             else
-                r.Sig("画像", "系统区域匹配出口", 4, 70, f.Locale + " vs " + f.Country,
-                    "把系统区域改成 " + f.Country, "系统区域 " + localeCc + " 与出口 " + f.Country + " 不一致");
+            {
+                var targetCulture = LocalePolicy.TargetCulture(f.Locale, f.Country);
+                bool canAutoFixCulture = Collector.IsSupported(f.Country) && f.CountrySourcesAgree
+                    && !string.IsNullOrEmpty(targetCulture);
+                string localeHint;
+                if (canAutoFixCulture)
+                    localeHint = "点「一键修复」把当前用户区域格式改为 " + targetCulture + "（不改显示语言和键盘）";
+                else if (!Collector.IsSupported(f.Country))
+                    localeHint = "当前出口不适合自动改区域；先更换到受支持地区并重新体检";
+                else if (!f.CountrySourcesAgree)
+                    localeHint = "IP 情报国家码未达成多源一致，暂不自动改区域；先换归属明确的节点";
+                else
+                    localeHint = "手动把当前用户区域格式改成与出口 " + f.Country + " 一致";
 
-            // 简繁与出口地区的对应: 繁体主要用于 TW/HK/MO，简体用于 CN/SG
-            string variant = null, ln = (f.Locale ?? "").ToLowerInvariant();
-            if (ln.Contains("hant") || ln.EndsWith("-tw") || ln.EndsWith("-hk") || ln.EndsWith("-mo")) variant = "繁体";
-            else if (ln.StartsWith("zh")) variant = "简体";
-            var tw = new[] { "TW", "HK", "MO" }; var cn = new[] { "CN", "SG", "MY" };
-            if (variant == null || string.IsNullOrEmpty(f.Country))
-                r.Sig("画像", "语言变体一致", 2, 100, variant ?? "非中文", null);
-            else if (variant == "繁体" && tw.Contains(f.Country.ToUpperInvariant()))
-                r.Sig("画像", "语言变体一致", 2, 100, "繁体 · " + f.Country, null);
-            else if (variant == "简体" && cn.Contains(f.Country.ToUpperInvariant()))
-                r.Sig("画像", "语言变体一致", 2, 100, "简体 · " + f.Country, null);
+                int pct = f.LangName == "zh" ? 50 : 70;
+                r.Sig("画像", "系统区域匹配出口", 4, pct, f.Locale + " vs " + f.Country, localeHint,
+                    "系统区域 " + localeCc + " 与出口 " + f.Country + " 不一致",
+                    canAutoFixCulture ? "可一键修复: 当前用户区域格式改为 " + targetCulture : localeHint);
+                if (canAutoFixCulture) r.FixableCulture = targetCulture;
+            }
+
+            var systemLanguage = LocalePolicy.Evaluate(f.Locale, f.Country);
+            if (systemLanguage.Kind == LocaleMatchKind.Conflict)
+                r.Sig("画像", "语言变体一致", 2, 50, systemLanguage.Variant + " vs " + f.Country,
+                    LocalePolicy.LanguageHint(f.Country, "Windows 首选语言"),
+                    "系统使用" + systemLanguage.Variant + "中文，但出口 " + f.Country + " 对应另一种中文变体");
             else
-                r.Sig("画像", "语言变体一致", 2, 50, variant + " vs " + f.Country,
-                    "网页端登录前可把首选语言调成 en-US",
-                    "系统用" + variant + "中文但出口在 " + f.Country + "，语言变体与地区画像不对应");
+                r.Sig("画像", "语言变体一致", 2, 100,
+                    systemLanguage.Kind == LocaleMatchKind.Unknown ? "无法确认（不扣分）" : (systemLanguage.Tag ?? "非中文"), null);
 
             // D. DNS (10)
             if (f.DnsVerdict.StartsWith("正常") || f.DnsVerdict.StartsWith("代理接管"))
@@ -859,23 +1081,25 @@ namespace CheckClaude
                         "重启浏览器，让它重新读系统时区",
                         "浏览器时区 " + f.BrTz + " 与系统时区不一致", "重启浏览器");
 
-                if (!string.IsNullOrEmpty(f.Country) && (f.BrLangs ?? "").StartsWith("zh")
-                    && !Collector.IsUnsupported(f.Country))
+                var browserLanguage = LocalePolicy.Evaluate(f.BrLangs, f.Country);
+                if (browserLanguage.Kind == LocaleMatchKind.Conflict)
                     r.Sig("浏览器", "浏览器语言", 2, 40, f.BrLangs + " vs " + f.Country,
-                        "把浏览器首选语言调成 en-US",
-                        "浏览器语言 " + f.BrLangs + " 与出口地区 " + f.Country + " 矛盾（网页端登录时直接可见）");
-                else r.Sig("浏览器", "浏览器语言", 2, 100, f.BrLangs ?? "?", null);
+                        LocalePolicy.BrowserLanguageHint(f.Country, f.BrUa),
+                        "浏览器语言 " + f.BrLangs + " 与出口地区 " + f.Country + " 的中文变体矛盾（网页端登录时直接可见）");
+                else
+                    r.Sig("浏览器", "浏览器语言", 2, 100, f.BrLangs ?? "?", null);
 
                 var rd = (f.BrWebgl ?? "");
                 if (!string.IsNullOrEmpty(f.BrFonts)) rd += " · " + f.BrFonts.Split(',').Length + " 中文字体";
                 r.Sig("浏览器", "渲染环境", 2, string.IsNullOrEmpty(f.BrWebgl) ? 50 : 100,
                     string.IsNullOrEmpty(f.BrWebgl) ? "未取到 GPU 信息" : rd, "从托盘点「重新体检」重新采集");
 
-                if (string.IsNullOrEmpty(f.BrLocale) || string.IsNullOrEmpty(f.Country) || f.BrLocale.EndsWith("-" + f.Country))
-                    r.Sig("浏览器", "Intl 区域设置", 1, 100, f.BrLocale ?? "?", null);
-                else
+                var intlLocale = LocalePolicy.Evaluate(f.BrLocale, f.Country);
+                if (intlLocale.Kind == LocaleMatchKind.Conflict)
                     r.Sig("浏览器", "Intl 区域设置", 1, 50, f.BrLocale + " vs " + f.Country,
-                        "浏览器设置里把语言/区域调成与出口地区一致");
+                        LocalePolicy.BrowserLanguageHint(f.Country, f.BrUa));
+                else
+                    r.Sig("浏览器", "Intl 区域设置", 1, 100, f.BrLocale ?? "?", null);
 
                 // Client Hints(Chromium 独有): 平台标识要和真实系统对得上
                 if (!real) r.Sig("浏览器", "Client Hints", 2, 70, "内置引擎未采集", null);
@@ -889,13 +1113,24 @@ namespace CheckClaude
 
                 if (!real || string.IsNullOrEmpty(f.BrAccept))
                     r.Sig("浏览器", "HTTP 语言首标", 1, 100, f.BrAccept ?? "未采集", null);
-                else if (!string.IsNullOrEmpty(f.Country) && f.BrAccept.StartsWith("zh")
-                         && !new[] { "CN", "HK", "TW", "MO", "SG" }.Contains(f.Country.ToUpperInvariant()))
-                    r.Sig("浏览器", "HTTP 语言首标", 1, 0, f.BrAccept + " vs " + f.Country,
-                        "浏览器设置 → 语言，把 English (United States) 拖到第一位",
-                        "请求头 Accept-Language: " + f.BrAccept + " 与出口 " + f.Country + " 矛盾，服务端第一眼就能看到");
-                else r.Sig("浏览器", "HTTP 语言首标", 1, 100,
-                        f.BrAccept.Length > 24 ? f.BrAccept.Substring(0, 24) : f.BrAccept, null);
+                else
+                {
+                    var acceptFirst = LocalePolicy.PrimaryTag(f.BrAccept);
+                    var browserFirst = LocalePolicy.PrimaryTag(f.BrLangs);
+                    var httpLanguage = LocalePolicy.Evaluate(f.BrAccept, f.Country);
+                    if (!string.IsNullOrEmpty(acceptFirst) && !string.IsNullOrEmpty(browserFirst)
+                        && !string.Equals(acceptFirst, browserFirst, StringComparison.OrdinalIgnoreCase))
+                        r.Sig("浏览器", "HTTP 语言首标", 1, 0, acceptFirst + " ≠ " + browserFirst,
+                            "统一浏览器首选语言，并关闭修改请求头的扩展",
+                            "HTTP Accept-Language 与 navigator.languages 首选语言不一致，浏览器画像存在矛盾");
+                    else if (httpLanguage.Kind == LocaleMatchKind.Conflict)
+                        r.Sig("浏览器", "HTTP 语言首标", 1, 0, f.BrAccept + " vs " + f.Country,
+                            LocalePolicy.BrowserLanguageHint(f.Country, f.BrUa),
+                            "请求头 Accept-Language: " + f.BrAccept + " 与出口 " + f.Country + " 的中文变体矛盾，服务端第一眼就能看到");
+                    else
+                        r.Sig("浏览器", "HTTP 语言首标", 1, 100,
+                            f.BrAccept.Length > 24 ? f.BrAccept.Substring(0, 24) : f.BrAccept, null);
+                }
             }
 
             // 关键项一票否决: 这几项任一不满分，总分再高也不能算"可用"。
@@ -932,11 +1167,18 @@ namespace CheckClaude
     }
 
     // ── 修复 ────────────────────────────────────────────────────
+    class FixOutcome
+    {
+        public string Label, Detail;
+        public bool Success;
+    }
+
     static class Fixer
     {
-        // 改时区和 DNS 都要管理员，用 runas 提权跑一条命令，会弹一次 UAC
-        static bool RunElevated(string exe, string args)
+        // 改时区和 DNS 都要管理员，用 runas 提权跑一条命令；失败原因必须回传给用户。
+        static bool RunElevated(string exe, string args, out string error)
         {
+            error = null;
             try
             {
                 var psi = new ProcessStartInfo(exe, args)
@@ -947,19 +1189,85 @@ namespace CheckClaude
                 };
                 using (var p = Process.Start(psi))
                 {
-                    p.WaitForExit(30000);
-                    return p.ExitCode == 0;
+                    if (p == null) { error = "无法启动修复命令"; return false; }
+                    if (!p.WaitForExit(30000)) { error = "执行超时，设置可能尚未生效"; return false; }
+                    if (p.ExitCode != 0) { error = "命令退出码 " + p.ExitCode; return false; }
+                    return true;
                 }
             }
-            catch { return false; }   // 用户点了「否」也走这里
+            catch (Exception e)
+            {
+                error = e.Message; // 包括用户取消 UAC
+                return false;
+            }
         }
 
-        public static bool FixTimezone(string windowsTzId)
+        public static FixOutcome FixTimezone(string windowsTzId)
         {
-            if (string.IsNullOrEmpty(windowsTzId)) return false;
-            var ok = RunElevated("cmd.exe", "/c tzutil /s \"" + windowsTzId + "\"");
-            Paths.Write("fix: 时区 -> " + windowsTzId + (ok ? " 成功" : " 失败"));
-            return ok;
+            var result = new FixOutcome { Label = "系统时区" };
+            if (string.IsNullOrEmpty(windowsTzId))
+            { result.Detail = "没有可用的 Windows 时区映射"; return result; }
+            string error;
+            result.Success = RunElevated("cmd.exe", "/c tzutil /s \"" + windowsTzId + "\"", out error);
+            result.Detail = result.Success ? "已改为 " + windowsTzId : "修改失败：" + (error ?? "未知错误");
+            Paths.Write("fix: 时区 -> " + windowsTzId + (result.Success ? " 成功" : " 失败: " + error));
+            return result;
+        }
+
+        // Set-Culture 只修改当前用户的区域格式，不修改 Windows 显示语言、键盘或语言包。
+        public static FixOutcome FixCulture(string cultureName)
+        {
+            var result = new FixOutcome { Label = "当前用户区域格式" };
+            try { CultureInfo.GetCultureInfo(cultureName); }
+            catch
+            {
+                result.Detail = "修改失败：Windows 不识别区域 " + (cultureName ?? "?");
+                return result;
+            }
+
+            try
+            {
+                var escaped = cultureName.Replace("'", "''");
+                var args = "-NoProfile -NonInteractive -Command \"$ErrorActionPreference='Stop'; Set-Culture -CultureInfo '"
+                         + escaped + "'\"";
+                var psi = new ProcessStartInfo("powershell.exe", args)
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    if (p == null) throw new InvalidOperationException("无法启动 PowerShell");
+                    if (!p.WaitForExit(30000))
+                    {
+                        result.Detail = "修改失败：执行超时";
+                        return result;
+                    }
+                    var stdout = p.StandardOutput.ReadToEnd().Trim();
+                    var stderr = p.StandardError.ReadToEnd().Trim();
+                    if (p.ExitCode != 0)
+                    {
+                        result.Detail = "修改失败：" + (stderr.Length > 0 ? stderr : (stdout.Length > 0 ? stdout : "PowerShell 退出码 " + p.ExitCode));
+                        return result;
+                    }
+                }
+
+                var actual = LocalePolicy.CurrentUserCultureName();
+                result.Success = string.Equals(actual, cultureName, StringComparison.OrdinalIgnoreCase);
+                result.Detail = result.Success
+                    ? "已改为 " + cultureName + "（显示语言和键盘未改）"
+                    : "命令已执行，但当前用户区域仍为 " + actual + "；请注销后检查";
+                Paths.Write("fix: 当前用户区域 -> " + cultureName + (result.Success ? " 成功" : " 未验证: " + actual));
+                return result;
+            }
+            catch (Exception e)
+            {
+                result.Detail = "修改失败：" + e.Message;
+                Paths.Write("fix: 当前用户区域 -> " + cultureName + " 失败: " + e.Message);
+                return result;
+            }
         }
 
         // 先验证候选 DNS 能正确解析 claude.ai(没被投毒)再写入 —— 盲目改会把能用的环境改坏
@@ -984,36 +1292,55 @@ namespace CheckClaude
             return good;
         }
 
-        public static bool FixDns(string nic)
+        public static FixOutcome FixDns(string nic)
         {
-            if (string.IsNullOrEmpty(nic)) return false;
+            var result = new FixOutcome { Label = "DNS 设置" };
+            if (string.IsNullOrEmpty(nic))
+            { result.Detail = "修改失败：未找到活动网络适配器"; return result; }
             var good = VerifyDns("1.1.1.1", "8.8.8.8", "9.9.9.9");
-            if (good.Count == 0) { Paths.Write("fix: 候选 DNS 全部解析异常，放弃"); return false; }
+            if (good.Count == 0)
+            {
+                result.Detail = "修改失败：候选 DNS 均未通过 claude.ai 解析验证";
+                Paths.Write("fix: 候选 DNS 全部解析异常，放弃");
+                return result;
+            }
 
             var sb = new StringBuilder();
             sb.Append("/c netsh interface ipv4 set dnsservers name=\"" + nic + "\" static " + good[0] + " primary validate=no");
             for (int i = 1; i < good.Count; i++)
                 sb.Append(" && netsh interface ipv4 add dnsservers name=\"" + nic + "\" " + good[i] + " index=" + (i + 1) + " validate=no");
             sb.Append(" && ipconfig /flushdns");
-            var ok = RunElevated("cmd.exe", sb.ToString());
-            Paths.Write("fix: DNS " + nic + " -> " + string.Join(",", good.ToArray()) + (ok ? " 成功" : " 失败"));
-            return ok;
+            string error;
+            result.Success = RunElevated("cmd.exe", sb.ToString(), out error);
+            result.Detail = result.Success
+                ? nic + " 已改为 " + string.Join(", ", good.ToArray())
+                : "修改失败：" + (error ?? "未知错误");
+            Paths.Write("fix: DNS " + nic + " -> " + string.Join(",", good.ToArray()) + (result.Success ? " 成功" : " 失败: " + error));
+            return result;
         }
 
-        public static bool DisablePac()
+        public static FixOutcome DisablePac()
         {
+            var result = new FixOutcome { Label = "PAC 自动分流" };
             try
             {
                 using (var k = Registry.CurrentUser.OpenSubKey(
                     @"Software\Microsoft\Windows\CurrentVersion\Internet Settings", true))
                 {
-                    if (k == null) return false;
+                    if (k == null) { result.Detail = "关闭失败：无法打开当前用户代理设置"; return result; }
                     k.DeleteValue("AutoConfigURL", false);
                 }
+                result.Success = true;
+                result.Detail = "已关闭";
                 Paths.Write("fix: 已关闭 PAC 自动分流");
-                return true;
+                return result;
             }
-            catch { return false; }
+            catch (Exception e)
+            {
+                result.Detail = "关闭失败：" + e.Message;
+                Paths.Write("fix: 关闭 PAC 失败: " + e.Message);
+                return result;
+            }
         }
     }
 
@@ -1099,7 +1426,7 @@ namespace CheckClaude
             t.Tick += (s, e) => { t.Stop(); t.Dispose(); a(); };
             t.Start();
         }
-        bool busy, probeBusy;
+        bool busy, probeBusy, fixing;
         BrowserBridge bridge;
         // 检测间隔存注册表，重启后保持
         int ScanInterval
@@ -1203,7 +1530,7 @@ namespace CheckClaude
 
         void RunExitProbe()
         {
-            if (busy || phase || probeBusy) return;
+            if (busy || phase || probeBusy || fixing) return;
             probeBusy = true;
             Task.Run(() =>
             {
@@ -1254,7 +1581,7 @@ namespace CheckClaude
         // 对用户是一次点击，内部分几步不暴露。
         void RunCheck(bool manual, bool withBrowser = true)
         {
-            if (busy || phase) return;
+            if (busy || phase || fixing) return;
             busy = true;
             phase = true;
             Task.Run(() =>
@@ -1343,9 +1670,9 @@ namespace CheckClaude
             {
                 var f = report.F;
                 var r = report;
-                bool unfit = score < 70;
+                bool highRisk = report.Grade == "高风险" || report.Grade == "危险" || report.Grade == "风险";
                 var head = new ToolStripMenuItem("Claude 环境 " + score + " 分 · " + report.Grade);
-                if (unfit) head.ForeColor = Color.FromArgb(200, 30, 30);
+                if (highRisk) head.ForeColor = Color.FromArgb(200, 30, 30);
                 // 明细放子菜单，主菜单保持短
                 head.DropDownItems.Add(Item(report.Verdict));
                 head.DropDownItems.Add(new ToolStripSeparator());
@@ -1362,7 +1689,7 @@ namespace CheckClaude
                 {
                     if (s.Group != grp) { grp = s.Group; head.DropDownItems.Add(Item("── " + grp + " ──")); }
                     var li = Item((s.Ok ? "✓" : "⚠") + "  " + s.Label + "：" + s.Value + "   " + s.Points + "/" + s.Weight);
-                    if (unfit && !s.Ok) li.ForeColor = Color.FromArgb(200, 30, 30);
+                    if (highRisk && !s.Ok) li.ForeColor = Color.FromArgb(200, 30, 30);
                     head.DropDownItems.Add(li);
                 }
                 head.DropDownItems.Add(new ToolStripSeparator());
@@ -1373,18 +1700,20 @@ namespace CheckClaude
                     (string.IsNullOrEmpty(f.ClaudeBase) ? "官方" : f.ClaudeBase)));
                 m.Items.Add(head);
 
-                if (phase) m.Items.Add(Item("正在检测…"));
+                if (phase || fixing) m.Items.Add(Item(fixing ? "正在修复…" : "正在检测…"));
                 else m.Items.Add(Item("重新体检", (s, e) => RunCheck(true)));
-                // 始终摆在这儿: 按钮凭空消失会让人以为功能没了，置灰说明比隐藏清楚
-                if (!string.IsNullOrEmpty(report.FixList))
+                // 始终摆在这儿；只有手动项时仍可点击查看完整方案。
+                if (fixing)
+                    m.Items.Add(Item("⚡ 一键修复（执行中…）", null, false));
+                else if (!string.IsNullOrEmpty(report.FixList))
                     m.Items.Add(Item("⚡ 一键修复：" + report.FixList, (s, e) => DoFix()));
+                else if (score >= 100)
+                    m.Items.Add(Item("⚡ 一键修复（已满分，无需修复）", null, false));
                 else
-                    m.Items.Add(Item(score >= 100 ? "⚡ 一键修复（已满分，无需修复）"
-                                                  : "⚡ 一键修复（剩余项需手动处理）"));
+                    m.Items.Add(Item("⚡ 一键修复 / 查看方案（剩余项需手动处理）", (s, e) => DoFix()));
 
                 // 手动处理步骤常驻菜单: 修复弹窗是一次性的，关掉就找不回来了
-                var autoFixable = new[] { "系统时区匹配出口", "DNS 出口", "代理形态" };
-                var manual = r.Gains.Where(g => !autoFixable.Contains(g.Label)).ToList();
+                var manual = r.ManualGains;
                 if (manual.Count > 0)
                 {
                     var mm = new ToolStripMenuItem("📋 手动处理步骤（" + manual.Count + " 项）");
@@ -1395,6 +1724,8 @@ namespace CheckClaude
                             if (part.Trim().Length > 0) mm.DropDownItems.Add(Item("      " + part.Trim()));
                         mm.DropDownItems.Add(new ToolStripSeparator());
                     }
+                    if (manual.Any(IsBrowserLanguageSignal))
+                        mm.DropDownItems.Add(Item("打开浏览器语言设置", (s2, e2) => OpenBrowserLanguageSettings(r.F)));
                     mm.DropDownItems.Add(Item("重新体检", (s2, e2) => RunCheck(true)));
                     m.Items.Add(mm);
                 }
@@ -1491,36 +1822,122 @@ namespace CheckClaude
             m.Items.Add(Item("退出", (s, e) => { icon.Visible = false; Application.Exit(); }));
         }
 
+        static void AppendManualPlan(StringBuilder sb, List<Signal> manual)
+        {
+            if (manual.Count == 0) return;
+            sb.AppendLine("需要手动处理：");
+            int i = 1;
+            foreach (var g in manual)
+                sb.AppendLine("  " + i++ + ". " + g.Label + "（+" + (g.Weight - g.Points) + " 分）\r\n     " + (g.Hint ?? "查看检测详情"));
+        }
+
+        static bool IsBrowserLanguageSignal(Signal signal)
+        {
+            return signal != null && (signal.Label == "浏览器语言" || signal.Label == "Intl 区域设置"
+                || signal.Label == "HTTP 语言首标");
+        }
+
+        static void OpenBrowserLanguageSettings(Facts facts)
+        {
+            string browser = LocalePolicy.BrowserName(facts == null ? null : facts.BrUa);
+            string exe = null, url = null;
+            if (browser == "Google Chrome") { exe = "chrome.exe"; url = "chrome://settings/languages"; }
+            else if (browser == "Microsoft Edge") { exe = "msedge.exe"; url = "edge://settings/languages"; }
+            else if (browser == "Firefox") { exe = "firefox.exe"; url = "about:preferences#general"; }
+            try
+            {
+                if (exe == null) throw new InvalidOperationException("未识别浏览器");
+                Process.Start(new ProcessStartInfo(exe, url) { UseShellExecute = true });
+            }
+            catch
+            {
+                try { Process.Start(new ProcessStartInfo("ms-settings:regionlanguage") { UseShellExecute = true }); }
+                catch { MessageBox.Show("请按“手动处理步骤”进入浏览器语言设置。", "CheckClaude", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+            }
+        }
+
+        static List<string> AutoFixPlan(Report r)
+        {
+            var plan = new List<string>();
+            if (r.FixableTz != null)
+                plan.Add("系统时区：" + r.F.SysTimezone + " → " + (r.F.IpTimezone ?? r.FixableTz) + "（" + r.FixableTz + "）");
+            if (r.FixableCulture != null)
+                plan.Add("当前用户区域格式：" + (r.F.Locale ?? "?") + " → " + r.FixableCulture + "（不改显示语言和键盘）");
+            if (r.FixablePac)
+                plan.Add("PAC 自动分流：开启 → 关闭");
+            if (r.FixableDns)
+                plan.Add("DNS 设置：" + (string.IsNullOrEmpty(r.F.DnsServers) ? "当前配置" : r.F.DnsServers)
+                    + " → 经 claude.ai 验证通过的公共 DNS");
+            return plan;
+        }
+
         void DoFix()
         {
-            if (report == null) return;
+            if (report == null || fixing) return;
             var r = report;
+            var autoPlan = AutoFixPlan(r);
+            var manual = r.ManualGains;
+
+            if (autoPlan.Count == 0)
+            {
+                var onlyManual = new StringBuilder("当前没有可安全自动修改的项目。\r\n\r\n");
+                AppendManualPlan(onlyManual, manual);
+                onlyManual.AppendLine("\r\n完成后请从托盘菜单点「重新体检」。");
+                MessageBox.Show(onlyManual.ToString(), "CheckClaude 手动处理方案",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var confirm = new StringBuilder("将按顺序执行以下自动修改：\r\n");
+            for (int i = 0; i < autoPlan.Count; i++)
+                confirm.AppendLine("  " + (i + 1) + ". " + autoPlan[i]);
+            if (manual.Count > 0)
+            {
+                confirm.AppendLine();
+                AppendManualPlan(confirm, manual);
+            }
+            confirm.AppendLine("\r\n每项独立执行；失败不会回滚已成功项目，并会显示具体原因。是否开始？");
+            if (MessageBox.Show(confirm.ToString(), "确认一键修复",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+
+            fixing = true;
+            BuildMenu();
             Task.Run(() =>
             {
-                bool any = false;
-                if (r.FixableTz != null) any |= Fixer.FixTimezone(r.FixableTz);
-                if (r.FixablePac) any |= Fixer.DisablePac();
-                if (r.FixableDns) any |= Fixer.FixDns(r.F.ActiveNic);
-                var autoFix = new[] { "系统时区匹配出口", "DNS 出口", "代理形态" };
-                var todo = r.Gains.Where(g => !autoFix.Contains(g.Label)).ToList();
+                var outcomes = new List<FixOutcome>();
+                try
+                {
+                    if (r.FixableTz != null) outcomes.Add(Fixer.FixTimezone(r.FixableTz));
+                    if (r.FixableCulture != null) outcomes.Add(Fixer.FixCulture(r.FixableCulture));
+                    if (r.FixablePac) outcomes.Add(Fixer.DisablePac());
+                    if (r.FixableDns) outcomes.Add(Fixer.FixDns(r.F.ActiveNic));
+                }
+                catch (Exception e)
+                {
+                    outcomes.Add(new FixOutcome { Label = "修复流程", Detail = "执行失败：" + e.Message, Success = false });
+                    Paths.Write("fix: 修复流程异常: " + e.Message);
+                }
+
                 Sync(() =>
                 {
-                    icon.ShowBalloonTip(5000, "CheckClaude",
-                        any ? "修复完成，正在重新体检" : "没有修复成功的项（可能取消了授权）", ToolTipIcon.Info);
-                    if (todo.Count > 0)
+                    fixing = false;
+                    BuildMenu();
+                    int succeeded = outcomes.Count(x => x.Success);
+                    var result = new StringBuilder();
+                    result.AppendLine("自动修复结果（" + succeeded + "/" + outcomes.Count + " 成功）：\r\n");
+                    foreach (var outcome in outcomes)
+                        result.AppendLine((outcome.Success ? "✓ " : "✗ ") + outcome.Label + "：" + outcome.Detail);
+                    if (manual.Count > 0)
                     {
-                        var sb = new StringBuilder(any
-                            ? "已自动修复的部分完成。还有 " + todo.Count + " 项需要你手动处理：\r\n\r\n"
-                            : "有 " + todo.Count + " 项需要你手动处理（这些无法自动完成）：\r\n\r\n");
-                        int i = 1;
-                        foreach (var g in todo)
-                            sb.AppendLine(i++ + ". " + g.Label + "（+" + (g.Weight - g.Points) + " 分）\r\n   " + (g.Hint ?? ""));
-                        sb.AppendLine("\r\n（这些步骤随时可以在托盘菜单 →「📋 手动处理步骤」里翻到，不用记）");
-                        MessageBox.Show(sb.ToString(), "CheckClaude 修复指引",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        result.AppendLine();
+                        AppendManualPlan(result, manual);
                     }
+                    result.AppendLine("\r\n关闭此窗口后会重新体检；浏览器语言等手动项不会被程序直接修改。");
+                    MessageBox.Show(result.ToString(), "CheckClaude 修复结果",
+                        MessageBoxButtons.OK, succeeded == outcomes.Count ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    icon.ShowBalloonTip(5000, "CheckClaude", "修复步骤已执行，正在重新体检", ToolTipIcon.Info);
+                    RunCheck(false);
                 });
-                RunCheck(false);
             });
         }
     }

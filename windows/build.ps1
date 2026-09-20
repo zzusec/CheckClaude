@@ -1,4 +1,4 @@
-﻿param([string]$Version = "4.12")
+﻿param([string]$Version = "4.16")
 # 用 Windows 自带的 csc.exe 编译，产物是单个 exe，目标机不需要装任何运行时。
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -43,9 +43,10 @@ CheckClaude for Windows
 
 开机自启: 右键托盘图标 → 勾选「开机自启」。
 
-一键修复会改系统时区 / DNS / 代理设置，需要管理员权限，
-会弹一次 UAC 授权框。DNS 修改前会先验证候选 DNS 能正确
-解析 claude.ai(没被投毒)，原设置可用 netsh 还原。
+一键修复会先列出变更，再逐项修改系统时区 / 当前用户区域格式 /
+DNS / PAC。时区和 DNS 需要管理员权限，可能分别弹出 UAC；区域格式
+不会改变 Windows 显示语言或键盘。DNS 修改前会先验证候选 DNS 能
+正确解析 claude.ai(没被投毒)，原设置可用 netsh 还原。
 
 数据只写在本机 %APPDATA%\CheckClaude，不上传任何内容。
 
