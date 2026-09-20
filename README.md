@@ -12,18 +12,18 @@ macOS, Windows and Linux.
 Built entirely on OS-native capabilities: no third-party runtime, no account, no data leaves your machine.
 
 ```
-Claude 环境 🟢 98 分 · 优秀
-   环境适合运行 Claude
-   ── 还能提 2 分 ──
-      ＋2  出口稳定性：固定一个节点，24 小时内别切线路
-   ── 出口 ──
-   ✓ 出口国家：US Los Angeles          14/14
-   ✓ Anthropic API 可达：HTTP 401      10/10
-   …
+Claude environment  98 · Excellent
+   This machine is suitable for running Claude
+   -- 2 points still available --
+      +2  Exit stability: stay on one node, no route switching for 24h
+   -- Exit --
+   OK  Exit country: US Los Angeles         14/14
+   OK  Anthropic API reachable: HTTP 401    10/10
+   ...
 ```
 
-> **Note**: the app's interface is in Simplified Chinese. This README documents it in English;
-> Chinese menu labels are quoted verbatim with an English gloss.
+> **Note**: the app's interface is currently Simplified Chinese only. Sample output and menu
+> names in this README are translated; menu items are identified by their position.
 
 > **Disclaimer**: the score reflects contradictions in your local environment fingerprint only.
 > It is not an official Anthropic verdict and is not a guarantee of account safety.
@@ -127,11 +127,11 @@ Grades are deliberately binary: **only the green tier says "usable"; every other
 
 | Grade | Condition |
 |---|---|
-| 🟢 优秀 Excellent | ≥ 90 points **and** all 6 critical signals at full marks — the only tier reported as "suitable for running Claude" |
-| 🟠 风险 At risk | The three exit paths disagree (split routing), regardless of total score |
-| 🟠 有风险 Risky | ≥ 70 points |
-| 🔴 高风险 High risk | ≥ 50 points, or the exit lands in a region Anthropic does not serve |
-| 🔴 危险 Dangerous | < 50 points |
+| Excellent | ≥ 90 points **and** all 6 critical signals at full marks — the only tier reported as "suitable for running Claude" |
+| Split routing | The three exit paths disagree (split routing), regardless of total score |
+| Risky | ≥ 70 points |
+| High risk | ≥ 50 points, or the exit lands in a region Anthropic does not serve |
+| Dangerous | < 50 points |
 
 **Critical signals override the total.** Exit country, Anthropic API reachable, timezone matches
 exit, WebRTC exit, IPv6 exit and three-paths-agree: if any one of them is below full marks, no
@@ -181,14 +181,13 @@ and latency to `claude.ai`, the Anthropic site and the API — useful for spotti
 extension proxy or PAC that disagrees with the shell's network path. That last part is diagnostic
 only; a `no-cors` response is never treated as an HTTP status.
 
-> **After changing browser settings, use 「重新体检（含浏览器采集）」 (re-scan, incl. browser)** —
-> it is the only entry point that reopens the browser. The neighbouring
-> 「立即检测（不含浏览器）」 (quick check, no browser) only re-probes the exit and reuses the
-> browser result from the last hour.
-> The Windows tray shows a 「浏览器画像」 (browser profile) line telling you **which browser
-> collected the data and how many minutes ago**. Collection always goes through the
-> **system default browser** — if that is not the one you changed, your change will not show up
-> in the score.
+> **After changing browser settings, use the re-scan entry** — the first action item in the
+> menu, right under the score. It is the only entry point that reopens the browser.
+> The quick-check entry further down (below the separator) only re-probes the exit and reuses
+> the browser result from the last hour, so clicking it after a browser change does nothing.
+> The Windows tray shows a browser-profile line telling you **which browser collected the data
+> and how many minutes ago**. Collection always goes through the **system default browser** —
+> if that is not the one you changed, your change will not show up in the score.
 
 On macOS a failed hand-off falls back to an embedded WKWebView. Windows and Linux keep a valid
 result for one hour, after which the browser signals are scored neutrally.
@@ -255,9 +254,9 @@ A background timer (1 minute by default) only runs the lightweight three-path pr
 scan runs on first launch, on an exit state change, or when you trigger it — it never hammers
 Anthropic's endpoints every minute.
 
-- Exit IP change confirmed twice in a row → "出口 IP 变化 A → B" (exit IP changed)
-- Consistent turning inconsistent → "⚠️ 出口 IP 异常" (exit IP anomaly); recovery → "出口已恢复正常"
-- A single failed query shows "网络检测波动" (probe jitter) and reuses the last valid result
+- Exit IP change confirmed twice in a row -> notification "exit IP changed: A -> B"
+- Consistent turning inconsistent -> "exit IP anomaly"; recovery -> "exit back to normal"
+- A single failed query is reported as probe jitter and reuses the last valid result
 - The probe holds a mutex, so a slow request never races the next round into stale state
 - Notifications fire **only on real state changes**
 
@@ -333,11 +332,11 @@ bash windows/test-remote.sh   # Windows bridge, incl. a real-Edge end-to-end run
 
 ## About
 
-This is a tool I use every day and decided to open source. My main product is **叮叮提醒**
-(DingDing Reminder) — medication, repayments, lunar birthdays, anniversary countdowns, exam
-timers: create one by saying a single sentence and get it delivered by WeChat, email, SMS or a
-phone call. Synced across a WeChat Mini Program, macOS and Windows; WeChat and email reminders
-are free for life. <https://www.yinso.com> — or search 「叮叮提醒」 in WeChat Mini Programs.
+This is a tool I use every day and decided to open source. My main product is **DingDing
+Reminder** — medication, repayments, lunar birthdays, anniversary countdowns, exam timers:
+create one by saying a single sentence and get it delivered by WeChat, email, SMS or a phone
+call. Synced across a WeChat Mini Program, macOS and Windows; WeChat and email reminders are
+free for life. <https://www.yinso.com>
 
 Thanks to [linux.do](https://linux.do/), a genuinely lively technical community where this
 project is also shared and discussed.
