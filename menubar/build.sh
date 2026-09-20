@@ -6,9 +6,21 @@ cd "$(dirname "$0")"
 APP="CheckClaude.app"
 BIN="CheckClaude"
 
-echo "编译 Swift ..."
-swiftc StatusApp.swift -o "$BIN" -framework Cocoa -framework WebKit -O
-swiftc CodexGuard.swift -o codex-guard -framework Network -O
+# 不指定 -target 时，swiftc 会把二进制的 minos 标成构建机当前系统版本，
+# 装到更低版本的 macOS 上 dyld 直接拒绝启动——Info.plist 里写的 12.0 不起作用。
+# 同理不 lipo 就只有构建机那一种架构，Intel Mac 打不开。
+DEPLOY_TARGET=12.0
+
+echo "编译 Swift (arm64 + x86_64, macOS $DEPLOY_TARGET+) ..."
+for arch in arm64 x86_64; do
+    swiftc StatusApp.swift -o "$BIN-$arch" -target "$arch-apple-macos$DEPLOY_TARGET" \
+        -framework Cocoa -framework WebKit -O
+    swiftc CodexGuard.swift -o "codex-guard-$arch" -target "$arch-apple-macos$DEPLOY_TARGET" \
+        -framework Network -O
+done
+lipo -create "$BIN-arm64" "$BIN-x86_64" -output "$BIN"
+lipo -create codex-guard-arm64 codex-guard-x86_64 -output codex-guard
+rm -f "$BIN-arm64" "$BIN-x86_64" codex-guard-arm64 codex-guard-x86_64
 
 echo "组装 .app 包 ..."
 rm -rf "$APP"
@@ -38,8 +50,8 @@ cat >"$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key>      <string>CheckClaude</string>
     <key>CFBundlePackageType</key>     <string>APPL</string>
     <key>CFBundleIconFile</key>        <string>AppIcon</string>
-    <key>CFBundleShortVersionString</key> <string>4.16</string>
-    <key>CFBundleVersion</key>          <string>4.16</string>
+    <key>CFBundleShortVersionString</key> <string>4.17</string>
+    <key>CFBundleVersion</key>          <string>4.17</string>
     <key>LSUIElement</key>             <true/>
     <key>LSMinimumSystemVersion</key>  <string>12.0</string>
 </dict>

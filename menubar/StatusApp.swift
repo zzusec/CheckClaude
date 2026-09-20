@@ -620,6 +620,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var feedbackToastToken = UUID()
     var isCheckingUpdate = false
 
+    // 菜单栏 App 没有窗口，用户双击一个已在运行的实例时系统什么都不显示，
+    // 很容易被当成「打不开」。给一条通知，指回菜单栏图标。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        notify("CheckClaude 已在运行", "点菜单栏右上角的图标查看体检结果")
+        return true
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
         // 上次升级若被 kickstart 打断，状态文件可能残留，启动时先清掉
         try? FileManager.default.removeItem(atPath: upgradeStatePath)
@@ -1874,7 +1881,13 @@ final class BrowserBridge {
 
     func start() {
         do {
-            let l = try NWListener(using: .tcp, on: .any)
+            // 必须显式绑到 127.0.0.1。NWParameters.tcp + on:.any 会监听 0.0.0.0，
+            // macOS 15 起这属于「本地网络」访问，未授权时浏览器连不上来，
+            // 浏览器组信号会整组掉到中性分；纯 loopback 则豁免该权限。
+            let params = NWParameters.tcp
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: .any)
+            params.allowLocalEndpointReuse = true
+            let l = try NWListener(using: params)
             l.newConnectionHandler = { [weak self] connection in self?.handle(connection) }
             l.stateUpdateHandler = { [weak self] state in
                 guard case .ready = state, let self, let port = self.listener?.port else { return }
