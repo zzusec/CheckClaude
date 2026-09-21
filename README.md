@@ -332,11 +332,11 @@ bash windows/test-remote.sh   # Windows bridge, incl. a real-Edge end-to-end run
 
 ## About
 
-This is a tool I use every day and decided to open source. My main product is **DingDing
-Reminder** — medication, repayments, lunar birthdays, anniversary countdowns, exam timers:
-create one by saying a single sentence and get it delivered by WeChat, email, SMS or a phone
-call. Synced across a WeChat Mini Program, macOS and Windows; WeChat and email reminders are
-free for life. <https://www.yinso.com>
+This is a tool I use every day and decided to open source. My main product is **叮叮提醒**
+(DingDing Reminder) — medication, repayments, lunar birthdays, anniversary countdowns, exam
+timers: create one by saying a single sentence and get it delivered by WeChat, email, SMS or a
+phone call. Synced across a WeChat Mini Program, macOS and Windows; WeChat and email reminders
+are free for life. <https://www.yinso.com> — or search 「叮叮提醒」 in WeChat Mini Programs.
 
 Thanks to [linux.do](https://linux.do/), a genuinely lively technical community where this
 project is also shared and discussed.
