@@ -278,13 +278,13 @@ func CollectThreeWayIPs(ctx context.Context, client *http.Client, f *Facts) {
 	}
 
 	// Check consistency
-	if f.CnIP != "" && f.IntlIP != "" && f.GfwIP != "" {
-		f.Consistent = (f.CnIP == f.IntlIP && f.IntlIP == f.GfwIP)
-	}
+	f.Consistent = threeWayConsistent(f)
 }
 
 // CollectIPIntel queries multiple IP intelligence APIs for the probe IP.
 func CollectIPIntel(ctx context.Context, client *http.Client, f *Facts) {
+	f.Hosting = -1
+	f.ASNMatch = -1
 	if f.ProbeIP == "" {
 		return
 	}
@@ -304,6 +304,7 @@ func CollectIPIntel(ctx context.Context, client *http.Client, f *Facts) {
 	go func() {
 		var r intelResult
 		r.source = "ip-api"
+		r.hosting = -1
 		url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,countryCode,city,isp,org,as,asname,proxy,hosting", f.ProbeIP)
 		body := httpGet(ctx, client, url)
 		if body != "" {
@@ -315,8 +316,11 @@ func CollectIPIntel(ctx context.Context, client *http.Client, f *Facts) {
 				if city := toString(data["city"]); city != "" {
 					f.City = city
 				}
-				if hosting, ok := data["hosting"].(bool); ok && hosting {
-					r.hosting = 1
+				if hosting, ok := data["hosting"].(bool); ok {
+					r.hosting = 0
+					if hosting {
+						r.hosting = 1
+					}
 				}
 				if proxy, ok := data["proxy"].(bool); ok {
 					r.proxy = proxy
@@ -468,7 +472,7 @@ func CollectServiceReachability(ctx context.Context, client *http.Client, f *Fac
 	ch := make(chan result, 3)
 
 	go func() {
-		code := httpStatusCode(ctx, client, "https://api.anthropic.com/v1/messages")
+		code := httpMessagesStatusCode(ctx, client, "https://api.anthropic.com/v1/messages")
 		ch <- result{"api", code}
 	}()
 	go func() {
@@ -541,6 +545,8 @@ func CollectIPv6(ctx context.Context, client *http.Client, f *Facts) {
 
 // CollectStability reads the history file and counts IP changes.
 func CollectStability(f *Facts) {
+	f.IPChanges = 0
+	f.IPHistoryComplete = false
 	dir := DataDir()
 	histFile := filepath.Join(dir, "network_history")
 	data, err := os.ReadFile(histFile)
@@ -548,9 +554,15 @@ func CollectStability(f *Facts) {
 		return
 	}
 
-	cutoff := time.Now().Add(-24 * time.Hour)
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+	// The tray samples every minute. Allow one missed round before treating
+	// coverage as incomplete; sparse CLI invocations do not establish 24h stability.
+	const maxGap = 2 * time.Minute
 	changes := 0
 	var lastIP string
+	var first, lastTime time.Time
+	continuous := true
 
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -562,15 +574,23 @@ func CollectStability(f *Facts) {
 		if len(fields) < 2 {
 			continue
 		}
-		ts, err := time.Parse("2006-01-02T15:04:05", fields[0])
-		if err != nil {
+		ts, err := parseHistoryTime(fields[0])
+		if err != nil || ts.After(now) || net.ParseIP(fields[1]) == nil {
 			continue
 		}
-		if ts.Before(cutoff) {
-			continue
+		if first.IsZero() {
+			first = ts
 		}
+		if !ts.Before(cutoff) && !lastTime.IsZero() && ts.Sub(lastTime) > maxGap {
+			continuous = false
+		}
+		lastTime = ts
 		ip := fields[1]
-		if ip != lastIP && lastIP != "" {
+		if ts.Before(cutoff) {
+			lastIP = ip
+			continue
+		}
+		if ip != lastIP {
 			// Check if this was a confirmed change
 			for _, field := range fields[2:] {
 				if field == "changed=1" {
@@ -583,6 +603,17 @@ func CollectStability(f *Facts) {
 	}
 
 	f.IPChanges = changes
+	f.IPHistoryComplete = !first.IsZero() && !first.After(cutoff) &&
+		!lastTime.Before(now.Add(-maxGap)) && continuous
+}
+
+// New records carry an explicit offset. Legacy records were written in local
+// time, so interpreting them as UTC shifts the 24-hour window.
+func parseHistoryTime(value string) (time.Time, error) {
+	if ts, err := time.Parse(time.RFC3339, value); err == nil {
+		return ts, nil
+	}
+	return time.ParseInLocation("2006-01-02T15:04:05", value, time.Local)
 }
 
 // CollectBrowser reads browser_signals file if recent enough (1 hour).
@@ -669,6 +700,28 @@ func httpGet(ctx context.Context, client *http.Client, url string) string {
 		return ""
 	}
 	return string(body)
+}
+
+// Messages accepts POST. An unauthenticated request should return 401, whereas
+// GET can return 405 even when the API is reachable. Never attach credentials.
+func httpMessagesStatusCode(ctx context.Context, client *http.Client, url string) int {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return 0
+	}
+	req.Header.Set("User-Agent", "CheckClaude/1.0")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0
+	}
+	resp.Body.Close()
+	return resp.StatusCode
 }
 
 func httpStatusCode(ctx context.Context, client *http.Client, url string) int {

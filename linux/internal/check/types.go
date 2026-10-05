@@ -47,11 +47,11 @@ type Facts struct {
 	IPv6CC string // IPv6 country code
 
 	// Profile consistency
-	IPTimezone  string // IANA timezone from exit IP (e.g. "America/Los_Angeles")
-	SysTimezone string // system timezone (IANA on Linux)
-	TZOffset    string // current UTC offset string (e.g. "-0700")
-	TZAbbr      string // timezone abbreviation (e.g. "PDT")
-	TZConsistent bool  // UTC offset matches timezone name
+	IPTimezone   string // IANA timezone from exit IP (e.g. "America/Los_Angeles")
+	SysTimezone  string // system timezone (IANA on Linux)
+	TZOffset     string // current UTC offset string (e.g. "-0700")
+	TZAbbr       string // timezone abbreviation (e.g. "PDT")
+	TZConsistent bool   // UTC offset matches timezone name
 
 	SysLocale string // system locale (e.g. "en_US.UTF-8", "zh_CN")
 	SysLang   string // primary language tag (e.g. "en", "zh")
@@ -65,8 +65,9 @@ type Facts struct {
 	DNSResult  string // raw DNS resolution result
 	DNSScope   string // e.g. "本地/代理接管", "国内公共DNS(223.5.5.5)"
 
-	IPChanges int    // confirmed IP changes in last 24h
-	VMHost    string // "物理机" or VM hypervisor name
+	IPChanges         int    // confirmed IP changes in last 24h
+	IPHistoryComplete bool   // 24h of recent minute samples, without gaps over 2 minutes
+	VMHost            string // "物理机" or VM hypervisor name
 
 	// Browser signals (from bridge)
 	BrOK     bool   // browser signals successfully collected
@@ -97,24 +98,24 @@ type Signal struct {
 
 // Report is the complete evaluation result.
 type Report struct {
-	Version   string   `json:"version"`
-	Score     int      `json:"score"`
-	Grade     string   `json:"grade"`
-	RiskLevel string   `json:"riskLevel"`
-	SafeUse   bool     `json:"safeUse"`
-	Verdict   string   `json:"verdict"`
-	Country   string   `json:"country"`
-	City      string   `json:"city"`
-	Consistent bool   `json:"consistent"`
-	Fixable   []string `json:"fixable"`
-	Manual    []string `json:"manual"`
-	Signals   []Signal `json:"signals"`
+	Version    string   `json:"version"`
+	Score      int      `json:"score"`
+	Grade      string   `json:"grade"`
+	RiskLevel  string   `json:"riskLevel"`
+	SafeUse    bool     `json:"safeUse"`
+	Verdict    string   `json:"verdict"`
+	Country    string   `json:"country"`
+	City       string   `json:"city"`
+	Consistent bool     `json:"consistent"`
+	Fixable    []string `json:"fixable"`
+	Manual     []string `json:"manual"`
+	Signals    []Signal `json:"signals"`
 
 	// Internal fields for fix logic (not in JSON)
-	FixableTZ     string `json:"-"`
-	FixableLocale string `json:"-"`
-	FixablePAC    bool   `json:"-"`
-	FixableDNS    bool   `json:"-"`
+	FixableTZ     string   `json:"-"`
+	FixableLocale string   `json:"-"`
+	FixablePAC    bool     `json:"-"`
+	FixableDNS    bool     `json:"-"`
 	CritFails     []string `json:"-"`
 }
 
@@ -122,7 +123,7 @@ type Report struct {
 const (
 	GradeExcellent = "优秀"
 	GradeRisky     = "有风险"
-	GradeRisk      = "风险"     // hard block: inconsistent exit
+	GradeRisk      = "风险" // hard block: inconsistent exit
 	GradeHighRisk  = "高风险"
 	GradeDanger    = "危险"
 )

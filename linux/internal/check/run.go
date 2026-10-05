@@ -81,9 +81,22 @@ func RecordIP(ip string) {
 				break
 			}
 		}
-		// Keep the file bounded: retain the most recent 500 lines.
-		if len(lines) > 500 {
-			_ = os.WriteFile(path, []byte(strings.Join(lines[len(lines)-500:], "\n")+"\n"), 0o644)
+		// Retain the 24h window plus the last earlier sample, which is needed
+		// to recognize a change at the window boundary. 500 minute samples
+		// cover only about eight hours.
+		cutoff := time.Now().Add(-24 * time.Hour)
+		start := 0
+		for i, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			if ts, err := parseHistoryTime(fields[0]); err == nil && ts.Before(cutoff) {
+				start = i
+			}
+		}
+		if start > 0 {
+			_ = os.WriteFile(path, []byte(strings.Join(lines[start:], "\n")+"\n"), 0o644)
 		}
 	}
 
@@ -91,7 +104,7 @@ func RecordIP(ip string) {
 	if last != "" && last != ip {
 		changed = "1"
 	}
-	line := time.Now().Format("2006-01-02T15:04:05") + " " + ip + " changed=" + changed + "\n"
+	line := time.Now().Format(time.RFC3339) + " " + ip + " changed=" + changed + "\n"
 
 	fh, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

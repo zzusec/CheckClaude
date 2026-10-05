@@ -70,12 +70,12 @@ func RegionNote(cc string) string {
 
 // Critical signals that trigger veto (cannot achieve "优秀" if any fails).
 var CriticalLabels = map[string]bool{
-	"出口国家":          true,
+	"出口国家":             true,
 	"Anthropic API 可达": true,
-	"系统时区匹配出口":     true,
-	"WebRTC 出口":       true,
-	"IPv6 出口":         true,
-	"三路出口一致":        true,
+	"系统时区匹配出口":         true,
+	"WebRTC 出口":        true,
+	"IPv6 出口":          true,
+	"三路出口一致":           true,
 }
 
 // Evaluate runs the 26-signal scoring engine on the given facts.
@@ -84,7 +84,7 @@ func Evaluate(f *Facts) *Report {
 		Version:    f.ClaudeVer,
 		Country:    f.Country,
 		City:       f.City,
-		Consistent: f.Consistent,
+		Consistent: threeWayConsistent(f),
 	}
 
 	var signals []Signal
@@ -477,14 +477,37 @@ func evalLinkSingle(f *Facts, add addFn) {
 }
 
 func evalThreeWay(f *Facts, add addFn) {
-	if f.Consistent {
+	if threeWayConsistent(f) {
 		add("画像", "三路出口一致", 6, 100, f.ProbeIP, "", "")
-	} else {
+	} else if threeWayMismatch(f) {
 		val := "不一致"
 		add("画像", "三路出口一致", 6, 30, val,
 			"三路出口 IP 不一致(分流/PAC/DNS 泄漏)，账号画像会在多地区间跳变",
 			"代理切全局模式，让国内/国外/谷歌三路走同一出口")
+	} else {
+		add("画像", "三路出口一致", 6, 50, "数据不足",
+			"部分出口探测未返回 IP，无法确认三路出口是否一致",
+			"检查探测服务的网络连通性后重试")
 	}
+}
+
+func threeWayConsistent(f *Facts) bool {
+	return f.CnIP != "" && f.IntlIP != "" && f.GfwIP != "" && !threeWayMismatch(f)
+}
+
+// A missing probe is unknown. A mismatch requires two observed, different IPs.
+func threeWayMismatch(f *Facts) bool {
+	var first string
+	for _, ip := range []string{f.CnIP, f.IntlIP, f.GfwIP} {
+		if ip == "" {
+			continue
+		}
+		if first != "" && ip != first {
+			return true
+		}
+		first = ip
+	}
+	return false
 }
 
 func evalTimezone(f *Facts, r *Report, add addFn) {
@@ -661,6 +684,13 @@ func evalProxyForm(f *Facts, r *Report, add addFn) {
 
 func evalStability(f *Facts, add addFn) {
 	n := f.IPChanges
+	if !f.IPHistoryComplete && n <= 1 {
+		add("稳定", "出口稳定性", 4, 50,
+			fmt.Sprintf("历史不足24h，已记录 %d 次跳变", n),
+			"历史记录尚未覆盖最近24小时，或采样存在中断",
+			"保持定期检测，积累完整的24小时记录")
+		return
+	}
 	switch {
 	case n <= 1:
 		add("稳定", "出口稳定性", 4, 100,
@@ -758,7 +788,8 @@ func evalBrowserLang(f *Facts, cc string, add addFn) {
 
 func evalBrowserIntl(f *Facts, cc string, add addFn) {
 	loc := f.BrLocale
-	if loc == "" || cc == "" || strings.HasSuffix(strings.ToUpper(loc), "-"+cc) {
+	region := browserLocaleRegion(loc)
+	if region == "" || cc == "" || strings.EqualFold(region, cc) {
 		add("浏览器", "Intl 区域设置", 1, 100, loc, "", "")
 	} else {
 		add("浏览器", "Intl 区域设置", 1, 50,
@@ -766,6 +797,27 @@ func evalBrowserIntl(f *Facts, cc string, add addFn) {
 			fmt.Sprintf("浏览器 Intl 区域 %s 与出口 %s 不对应", loc, cc),
 			"浏览器设置里把语言/区域调成与出口地区一致")
 	}
+}
+
+// Extract the ISO country subtag before extensions/private use. Language-only
+// tags (de), scripts (zh-Hant), and numeric macroregions do not name a country.
+func browserLocaleRegion(locale string) string {
+	parts := strings.Split(locale, "-")
+	if len(parts[0]) == 1 {
+		return ""
+	}
+	for _, part := range parts[1:] {
+		if len(part) == 1 {
+			break
+		}
+		if len(part) == 2 {
+			upper := strings.ToUpper(part)
+			if upper[0] >= 'A' && upper[0] <= 'Z' && upper[1] >= 'A' && upper[1] <= 'Z' {
+				return upper
+			}
+		}
+	}
+	return ""
 }
 
 func evalClientHints(f *Facts, add addFn) {
@@ -880,7 +932,7 @@ func determineGrade(f *Facts, r *Report, cc string) {
 	}
 
 	// Hard block 2: Three-way inconsistency
-	if !f.Consistent {
+	if threeWayMismatch(f) {
 		r.Grade = GradeRisk
 		r.RiskLevel = RiskHigh
 		ipInfo := ""

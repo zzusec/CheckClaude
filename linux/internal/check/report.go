@@ -11,25 +11,26 @@ import (
 
 // Details mirrors the raw facts exposed in JSON output.
 type Details struct {
-	IP           string `json:"ip"`
-	CountryName  string `json:"countryName"`
-	ISP          string `json:"isp"`
-	ASN          string `json:"asn"`
-	IPType       string `json:"ipType"`
-	APICode      int    `json:"apiCode"`
-	WebCode      int    `json:"webCode"`
-	SiteCode     int    `json:"siteCode"`
-	DNSScope     string `json:"dnsScope"`
-	DNSResult    string `json:"dnsResult"`
-	DNSServers   string `json:"dnsServers"`
-	SysTz        string `json:"sysTz"`
-	IPTz         string `json:"ipTz"`
-	Locale       string `json:"locale"`
-	ProxyMode    string `json:"proxyMode"`
-	VMHost       string `json:"vmHost"`
-	WebRTC       string `json:"webrtc"`
-	WebRTCStatus string `json:"webrtcStatus"`
-	IPChanges    int    `json:"ipChanges"`
+	IP                string `json:"ip"`
+	CountryName       string `json:"countryName"`
+	ISP               string `json:"isp"`
+	ASN               string `json:"asn"`
+	IPType            string `json:"ipType"`
+	APICode           int    `json:"apiCode"`
+	WebCode           int    `json:"webCode"`
+	SiteCode          int    `json:"siteCode"`
+	DNSScope          string `json:"dnsScope"`
+	DNSResult         string `json:"dnsResult"`
+	DNSServers        string `json:"dnsServers"`
+	SysTz             string `json:"sysTz"`
+	IPTz              string `json:"ipTz"`
+	Locale            string `json:"locale"`
+	ProxyMode         string `json:"proxyMode"`
+	VMHost            string `json:"vmHost"`
+	WebRTC            string `json:"webrtc"`
+	WebRTCStatus      string `json:"webrtcStatus"`
+	IPChanges         int    `json:"ipChanges"`
+	IPHistoryComplete bool   `json:"ipHistoryComplete"`
 }
 
 type jsonOut struct {
@@ -56,35 +57,38 @@ func webrtcStatus(f *Facts) string {
 		return "未采集"
 	case f.BrRTC == "":
 		return "无公网候选"
-	case f.ProbeIP != "" && strings.Contains(f.BrRTC, f.ProbeIP):
-		return "ok"
-	default:
-		return "泄漏"
 	}
+	for _, candidate := range strings.Split(f.BrRTC, ",") {
+		if ip := strings.TrimSpace(candidate); ip != "" && ip != f.ProbeIP {
+			return "泄漏"
+		}
+	}
+	return "ok"
 }
 
 // JSON renders the report as indented JSON.
 func JSON(f *Facts, r *Report) ([]byte, error) {
 	out := jsonOut{Report: r, Details: Details{
-		IP:           f.ProbeIP,
-		CountryName:  f.CountryName,
-		ISP:          f.ISP,
-		ASN:          f.ASN,
-		IPType:       ipTypeName(f),
-		APICode:      f.APICode,
-		WebCode:      f.WebCode,
-		SiteCode:     f.SiteCode,
-		DNSScope:     f.DNSScope,
-		DNSResult:    f.DNSVerdict,
-		DNSServers:   f.DNSResult,
-		SysTz:        f.SysTimezone,
-		IPTz:         f.IPTimezone,
-		Locale:       f.SysLocale,
-		ProxyMode:    f.ProxyMode,
-		VMHost:       f.VMHost,
-		WebRTC:       f.BrRTC,
-		WebRTCStatus: webrtcStatus(f),
-		IPChanges:    f.IPChanges,
+		IP:                f.ProbeIP,
+		CountryName:       f.CountryName,
+		ISP:               f.ISP,
+		ASN:               f.ASN,
+		IPType:            ipTypeName(f),
+		APICode:           f.APICode,
+		WebCode:           f.WebCode,
+		SiteCode:          f.SiteCode,
+		DNSScope:          f.DNSScope,
+		DNSResult:         f.DNSVerdict,
+		DNSServers:        f.DNSResult,
+		SysTz:             f.SysTimezone,
+		IPTz:              f.IPTimezone,
+		Locale:            f.SysLocale,
+		ProxyMode:         f.ProxyMode,
+		VMHost:            f.VMHost,
+		WebRTC:            f.BrRTC,
+		WebRTCStatus:      webrtcStatus(f),
+		IPChanges:         f.IPChanges,
+		IPHistoryComplete: f.IPHistoryComplete,
 	}}
 	return json.MarshalIndent(out, "", "  ")
 }
