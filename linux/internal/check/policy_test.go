@@ -142,6 +142,7 @@ func TestDirectChina(t *testing.T) {
 	f.APICode = 403
 	f.WebCode = 403
 	f.Consistent = false
+	f.CnIP = "203.0.113.9" // Supply the observed split, not only its cached flag.
 	f.SysTimezone = "Asia/Shanghai"
 	f.IPTimezone = "America/New_York"
 	f.SysLocale = "zh_CN"
@@ -174,15 +175,15 @@ func TestDirectChina(t *testing.T) {
 
 func TestTypicalProxyUser(t *testing.T) {
 	f := baselineFacts()
-	f.Hosting = 1                             // IDC: -2
-	f.SysTimezone = "Asia/Shanghai"           // timezone mismatch: -5
-	f.IPTimezone = "America/Los_Angeles"      // target
-	f.SysLocale = "zh_CN"                     // locale mismatch: -2
+	f.Hosting = 1                        // IDC: -2
+	f.SysTimezone = "Asia/Shanghai"      // timezone mismatch: -5
+	f.IPTimezone = "America/Los_Angeles" // target
+	f.SysLocale = "zh_CN"                // locale mismatch: -2
 	f.SysLang = "zh"
 	f.LocaleCC = "CN"
-	f.DNSScope = "国内公共DNS(223.5.5.5)"       // domestic DNS in TUN: -2 (70% of 4 = 2)
+	f.DNSScope = "国内公共DNS(223.5.5.5)" // domestic DNS in TUN: -2 (70% of 4 = 2)
 	f.IPv6 = "2408:8207::1"
-	f.IPv6CC = "CN"                            // IPv6 mismatch: -3
+	f.IPv6CC = "CN" // IPv6 mismatch: -3
 
 	r := Evaluate(f)
 
@@ -239,8 +240,8 @@ func TestPACNestedProxy(t *testing.T) {
 	f := baselineFacts()
 	f.PACOn = true
 	f.ProxyMode = "系统 HTTP 代理 + PAC 分流"
-	f.CfIP = "9.9.9.9"   // link not single: -3
-	f.Country2 = "JP"      // intel mismatch: -3
+	f.CfIP = "9.9.9.9" // link not single: -3
+	f.Country2 = "JP"  // intel mismatch: -3
 
 	r := Evaluate(f)
 
@@ -522,15 +523,15 @@ func TestThreeWaySplit(t *testing.T) {
 
 func TestScoreBoundary85_89(t *testing.T) {
 	f := baselineFacts()
-	f.Hosting = 1                         // IDC: -2
-	f.SysTimezone = "Asia/Shanghai"       // tz mismatch: -5
+	f.Hosting = 1                   // IDC: -2
+	f.SysTimezone = "Asia/Shanghai" // tz mismatch: -5
 	f.IPTimezone = "America/Los_Angeles"
-	f.SysLocale = "zh_CN"                 // locale zh mismatch: -2
+	f.SysLocale = "zh_CN" // locale zh mismatch: -2
 	f.SysLang = "zh"
 	f.LocaleCC = "CN"
 	// Total deduction: -9 → score 91
 	// Hmm, that's above 90. Let's add more:
-	f.BrLangs = "zh-CN,zh"               // browser lang conflict: -2 (40% of 2 → 0)
+	f.BrLangs = "zh-CN,zh" // browser lang conflict: -2 (40% of 2 → 0)
 	// Now: -11 → score 89
 
 	r := Evaluate(f)
