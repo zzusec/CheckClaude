@@ -277,10 +277,7 @@ func CollectThreeWayIPs(ctx context.Context, client *http.Client, f *Facts) {
 		f.ProbeIP = f.IntlIP
 	}
 
-	// Check consistency
-	if f.CnIP != "" && f.IntlIP != "" && f.GfwIP != "" {
-		f.Consistent = (f.CnIP == f.IntlIP && f.IntlIP == f.GfwIP)
-	}
+	f.Consistent = threeWayState(f) == egressConsistent
 }
 
 // CollectIPIntel queries multiple IP intelligence APIs for the probe IP.
@@ -663,6 +660,9 @@ func httpGet(ctx context.Context, client *http.Client, url string) string {
 		return ""
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	if err != nil {
@@ -704,7 +704,9 @@ func fetchIPFromCfTrace(ctx context.Context, client *http.Client) string {
 	body := httpGet(ctx, client, "https://cloudflare.com/cdn-cgi/trace")
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(line, "ip=") {
-			return strings.TrimPrefix(line, "ip=")
+			if ip, ok := observedIP(strings.TrimPrefix(line, "ip=")); ok {
+				return ip.String()
+			}
 		}
 	}
 	return ""
@@ -713,6 +715,18 @@ func fetchIPFromCfTrace(ctx context.Context, client *http.Client) string {
 var ipRe = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
 
 func extractIP(s string) string {
+	if ip, ok := observedIP(s); ok {
+		return ip.String()
+	}
+	var data struct {
+		IP string `json:"ip"`
+	}
+	if json.Unmarshal([]byte(s), &data) == nil {
+		if ip, ok := observedIP(data.IP); ok {
+			return ip.String()
+		}
+		return ""
+	}
 	m := ipRe.FindString(s)
 	if m != "" && net.ParseIP(m) != nil {
 		return m

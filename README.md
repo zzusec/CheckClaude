@@ -139,9 +139,10 @@ score gets you into the green tier. Two environments can both sit at 90 — one 
 minor items, the other leaked its real exit through WebRTC (6) plus a timezone mismatch (5).
 The risk is not comparable.
 
-A three-path disagreement is downgraded on its own: an account profile flickering between
-regions is one of the signals risk engines weigh most, and scoring it as a mere 6-point deduction
-would let an 80-something environment render as usable next to a red icon.
+On Linux, an observed same-family three-path disagreement is downgraded on its own,
+so a high total cannot hide differing exits. Mixed address families or incomplete probes
+remain unconfirmed and cannot produce a green all-clear. Address differences alone do not
+establish that an account has moved between regions.
 
 The weighting approach follows [check-cc](https://github.com/yacuo/check-cc); each platform here
 implements it locally.
@@ -158,11 +159,21 @@ Your source IP is echoed back from three different destinations:
 | International | What an unblocked foreign site sees | ipify / icanhazip / ipinfo |
 | Google / blocked | What Google-class blocked sites see | Cloudflare trace / ip.sb + Google reachability |
 
-All three matching means a clean, genuine exit. All three succeeding with different answers is
-split routing, PAC or a DNS leak, and alerts after two consecutive confirmations. A path that
-times out is marked as network jitter and the previous valid result is kept, so a single failed
-query is never counted as an IP change. The system timezone always follows the
+Matching samples establish observed address agreement, not proof that an exit is clean.
+Different answers require checking address families and routing before attributing a cause.
+The macOS network monitor alerts after two consecutive confirmations; a path that times out
+is marked as network jitter and the previous valid result is kept, so a single failed query
+is never counted as an IP change. The system timezone follows the
 **Google-path exit IP**.
+
+On Linux, the report distinguishes `consistent`, `different`, `mixed-family` and
+`incomplete` three-path samples. Addresses are normalized, including IPv4-mapped
+IPv6. A mixed IPv4/IPv6 result remains unconfirmed (partial points, never a green
+all-clear); it does not by itself prove split routing, DNS leakage or geographic
+movement. An observed disagreement within either address family still triggers
+the existing hard downgrade, including when the third sample belongs to the other
+family or is missing. JSON details expose `cnIP`, `intlIP`, `gfwIP` and
+`threeWayStatus` so the actual observations can be inspected.
 
 Line quality is measured over HTTPS on TCP rather than ICMP: the last 24 hours of total latency,
 TCP connect, TLS handshake, TTFB, HTTP status and success rate are kept per path.

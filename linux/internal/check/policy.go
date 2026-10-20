@@ -70,12 +70,12 @@ func RegionNote(cc string) string {
 
 // Critical signals that trigger veto (cannot achieve "优秀" if any fails).
 var CriticalLabels = map[string]bool{
-	"出口国家":          true,
+	"出口国家":             true,
 	"Anthropic API 可达": true,
-	"系统时区匹配出口":     true,
-	"WebRTC 出口":       true,
-	"IPv6 出口":         true,
-	"三路出口一致":        true,
+	"系统时区匹配出口":         true,
+	"WebRTC 出口":        true,
+	"IPv6 出口":          true,
+	"三路出口一致":           true,
 }
 
 // Evaluate runs the 26-signal scoring engine on the given facts.
@@ -84,7 +84,7 @@ func Evaluate(f *Facts) *Report {
 		Version:    f.ClaudeVer,
 		Country:    f.Country,
 		City:       f.City,
-		Consistent: f.Consistent,
+		Consistent: threeWayState(f) == egressConsistent,
 	}
 
 	var signals []Signal
@@ -218,6 +218,10 @@ func Evaluate(f *Facts) *Report {
 
 		// Critical check
 		if CriticalLabels[s.Label] && s.Points < s.Weight {
+			// Incomparable or missing samples are uncertainty, not a confirmed leak.
+			if s.Label == "三路出口一致" && threeWayState(f) != egressDifferent {
+				continue
+			}
 			// WebRTC special: only veto if points == 0
 			if s.Label == "WebRTC 出口" && s.Points > 0 {
 				continue
@@ -463,27 +467,42 @@ func evalEdgeMatch(f *Facts, cc string, add addFn) {
 }
 
 func evalLinkSingle(f *Facts, add addFn) {
+	cf, cfOK := observedIP(f.CfIP)
+	probe, probeOK := observedIP(f.ProbeIP)
 	switch {
-	case f.CfIP == "" || f.ProbeIP == "" || f.ProbeIP == "?":
+	case !cfOK || !probeOK:
 		add("质量", "出口链路单一", 3, 50, "数据不足", "", "")
-	case f.CfIP == f.ProbeIP:
+	case cf == probe:
 		add("质量", "出口链路单一", 3, 100, f.CfIP, "", "")
+	case cf.Is4() != probe.Is4():
+		add("质量", "出口链路单一", 3, 50,
+			f.CfIP+" / "+f.ProbeIP,
+			"Cloudflare 与出口探测返回不同地址族，无法仅凭此确认多层代理",
+			"分别核对 IPv4 和 IPv6 出口及其路由")
 	default:
 		add("质量", "出口链路单一", 3, 0,
 			f.CfIP+" ≠ "+f.ProbeIP,
-			fmt.Sprintf("Cloudflare 看到的来源 %s 与检测到的出口 %s 不同，链路上还有一层代理", f.CfIP, f.ProbeIP),
-			"统一走同一出口，避免多层嵌套代理")
+			fmt.Sprintf("Cloudflare 看到的来源 %s 与检测到的出口 %s 不同，可能存在多出口或另一层代理", f.CfIP, f.ProbeIP),
+			"核对路由、出口轮换和多层代理配置")
 	}
 }
 
 func evalThreeWay(f *Facts, add addFn) {
-	if f.Consistent {
+	switch threeWayState(f) {
+	case egressConsistent:
 		add("画像", "三路出口一致", 6, 100, f.ProbeIP, "", "")
-	} else {
-		val := "不一致"
-		add("画像", "三路出口一致", 6, 30, val,
-			"三路出口 IP 不一致(分流/PAC/DNS 泄漏)，账号画像会在多地区间跳变",
-			"代理切全局模式，让国内/国外/谷歌三路走同一出口")
+	case egressMixed:
+		add("画像", "三路出口一致", 6, 50, "IPv4/IPv6 混合（"+threeWaySummary(f)+"）",
+			"不同地址族不能直接比较，尚不能确认出口一致或存在分流，也不能据此断言地区跳变",
+			"分别核对 IPv4/IPv6 出口；需要单一出口时检查代理服务端的地址族策略")
+	case egressIncomplete:
+		add("画像", "三路出口一致", 6, 50, "数据不足（"+threeWaySummary(f)+"）",
+			"部分出口探测未获取有效 IP，无法完成三路一致性判断",
+			"检查失败的探测接口并重试")
+	case egressDifferent:
+		add("画像", "三路出口一致", 6, 30, "同地址族出口不同（"+threeWaySummary(f)+"）",
+			"同一地址族观察到不同出口 IP；仅凭地址差异不能确定 DNS 泄漏或地区跳变",
+			"核对分流规则、PAC 和代理服务端的多出口配置")
 	}
 }
 
@@ -879,15 +898,12 @@ func determineGrade(f *Facts, r *Report, cc string) {
 		return
 	}
 
-	// Hard block 2: Three-way inconsistency
-	if !f.Consistent {
+	// Hard block 2: Observed disagreement within the same address family.
+	state := threeWayState(f)
+	if state == egressDifferent {
 		r.Grade = GradeRisk
 		r.RiskLevel = RiskHigh
-		ipInfo := ""
-		if f.CnIP != "" && f.IntlIP != "" {
-			ipInfo = fmt.Sprintf("(%s / %s)", f.CnIP, f.IntlIP)
-		}
-		r.Verdict = fmt.Sprintf("出口分流%s，画像跳变，不建议使用", ipInfo)
+		r.Verdict = fmt.Sprintf("同地址族出口不同（%s），请核实路由和多出口配置", threeWaySummary(f))
 		r.SafeUse = false
 		return
 	}
@@ -908,6 +924,20 @@ func determineGrade(f *Facts, r *Report, cc string) {
 		r.RiskLevel = RiskHigh
 		r.Verdict = fmt.Sprintf("关键项未达标（%s），不建议使用", critNames)
 		r.SafeUse = false
+		return
+	}
+
+	// Do not turn an inconclusive comparison into either a confirmed leak or
+	// an all-clear. Other critical failures above still take precedence.
+	if state != egressConsistent && score >= 70 {
+		r.Grade = GradeRisky
+		r.RiskLevel = RiskMedium
+		r.SafeUse = false
+		if state == egressMixed {
+			r.Verdict = "三路探测混合 IPv4/IPv6，出口一致性尚未确认"
+		} else {
+			r.Verdict = "三路探测数据不足，出口一致性尚未确认"
+		}
 		return
 	}
 
